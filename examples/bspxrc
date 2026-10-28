@@ -1,0 +1,75 @@
+#!/bin/sh
+# bspx config, run by `bspx start` (and again by `bspx reload`).
+# Copy to ~/.config/bspx/bspxrc. Every line is an ordinary bspx command,
+# so you can also try them live in a terminal first.
+
+# Space between windows, and around the edges (top right bottom left).
+bspx config gap 8
+bspx config padding 8 8 8 8
+
+# How long a window takes to slide into place, in seconds (0 = off).
+bspx config animation 0.25
+
+# Animation curve: ease_in_out (speeds up, then settles: smoothest) or
+# ease_out (starts at full speed: snappiest).
+bspx config animation_easing ease_in_out
+
+# Share the old window keeps when a new one splits it.
+bspx config split_ratio 0.5
+
+# Step for `bspx resize <dir>`.
+bspx config resize_step 0.05
+
+# Drag a window by its title bar onto another to swap them. The target is
+# highlighted with this colour: RRGGBB or RRGGBBAA (last two = opacity).
+bspx config drag_swap on
+bspx config drag_color 5e9eff40
+
+# Hold this key and drag anywhere on a window: left button moves it
+# (drop it on another window to swap), right button resizes it from the
+# nearest corner. alt, cmd, ctrl, shift, fn, or off. While held, clicks do
+# not reach the app, so pick a key your apps do not need for clicks.
+bspx config mouse_modifier alt
+bspx config mouse_action1 move
+bspx config mouse_action2 resize
+
+# Move the pointer to the window focused with `bspx focus` or `bspx swap`.
+bspx config mouse_follows_focus off
+
+# Focus (and raise) the window the pointer rests on.
+bspx config focus_follows_mouse off
+
+# Apps that are never tiled. Use the names `bspx query` shows; on a
+# non-English Mac they are localized (e.g. "Sistem Ayarları").
+bspx rule float "System Settings"
+bspx rule float "Calculator"
+bspx rule float "Archive Utility"
+
+# Names for Spaces (numbered from 1, as in Mission Control), and apps whose
+# new windows go to a Space, by number or name. `bspx label` lists them.
+# bspx label 1 general
+# bspx label 2 web
+# bspx label 3 coding
+# bspx rule space web "Safari"
+# A Space whose windows are not tiled:
+# bspx layout coding float
+
+# Keyboard shortcuts. `bspx ...` commands run inside
+# bspx; anything else runs in your shell. `bspx bind` lists them.
+bspx bind 'alt - h : bspx focus left'
+bspx bind 'alt - j : bspx focus down'
+bspx bind 'alt - k : bspx focus up'
+bspx bind 'alt - l : bspx focus right'
+bspx bind 'shift + alt - h : bspx swap left'
+bspx bind 'shift + alt - j : bspx swap down'
+bspx bind 'shift + alt - k : bspx swap up'
+bspx bind 'shift + alt - l : bspx swap right'
+bspx bind 'ctrl + alt - h : bspx resize left'
+bspx bind 'ctrl + alt - j : bspx resize down'
+bspx bind 'ctrl + alt - k : bspx resize up'
+bspx bind 'ctrl + alt - l : bspx resize right'
+bspx bind 'alt - r : bspx rotate'
+bspx bind 'alt - e : bspx toggle-split'
+bspx bind 'alt - 0 : bspx balance'
+bspx bind 'alt - m : bspx zoom'
+bspx bind 'alt - t : bspx float'

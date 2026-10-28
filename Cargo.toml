@@ -1,0 +1,18 @@
+[package]
+name = "bspx"
+version = "0.2.0"
+edition = "2024"
+description = "A BSP tiling window manager for macOS with smooth animations."
+license = "GPL-3.0-only"
+
+[dependencies]
+log = "0.4"
+env_logger = "0.11"
+
+[lints.rust]
+# `--cfg bspx_check_macos` type-checks the macOS backend on other hosts.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(bspx_check_macos)'] }
+
+[profile.release]
+lto = true
+codegen-units = 1
