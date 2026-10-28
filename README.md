@@ -5,8 +5,7 @@
 <h1 align="center">bspx</h1>
 
 <p align="center">
-  An animated BSP tiling window manager for macOS, written in Rust.<br>
-  The animation engine is inspired by <a href="https://github.com/karinushka/paneru">Paneru</a>.
+  An animated BSP tiling window manager for macOS, written in Rust.
 </p>
 
 ## Features
@@ -223,4 +222,4 @@ Floating windows cannot be kept above tiled ones without disabling SIP, so bspx 
 
 ## License
 
-MIT. The animation engine is adapted from Paneru (MIT, Copyright (c) 2025 Karinushka). See `LICENSE.txt`.
+MIT. See `LICENSE.txt`.
