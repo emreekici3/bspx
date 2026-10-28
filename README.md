@@ -22,10 +22,6 @@
 - Shell-script config
 - No need to disable SIP
 
-## Demo
-
-https://github.com/user-attachments/assets/4d9d9de2-4863-4e89-8d14-7278809fe57c
-
 ## Requirements
 
 - macOS
