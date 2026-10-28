@@ -30,18 +30,11 @@ https://github.com/user-attachments/assets/4d9d9de2-4863-4e89-8d14-7278809fe57c
 ## Requirements
 
 - macOS
-- [Rust](https://rustup.rs), only when building from source
+- [Rust](https://rustup.rs)
 
 ## Installation
 
-**1. Get the binary** into `~/bin`, either prebuilt (Apple Silicon):
-
-```sh
-mkdir -p ~/bin
-curl -L https://github.com/emreekici3/bspx/releases/download/v0.2.0/bspx-v0.2.0-aarch64-apple-darwin.tar.gz | tar -xz -C ~/bin
-```
-
-or built from source (any Mac):
+**1. Build it** into `~/bin`:
 
 ```sh
 git clone https://github.com/emreekici3/bspx.git
@@ -67,16 +60,12 @@ bspx start
 
 ### Updating
 
-From source:
-
 ```sh
 cd bspx
 git pull
 cargo install --path . --root ~
 bspx restart
 ```
-
-For the prebuilt binary, download the new release the same way as above and run `bspx restart`.
 
 If windows stop moving after an update, macOS has dropped the permission for the new binary: remove `bspx` from the Accessibility list, add `~/bin/bspx` again, and run `bspx restart`.
 
