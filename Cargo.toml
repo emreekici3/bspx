@@ -8,6 +8,7 @@ license = "MIT"
 [dependencies]
 log = "0.4"
 env_logger = "0.11"
+regex = "1"
 
 [lints.rust]
 # `--cfg bspx_check_macos` type-checks the macOS backend on other hosts.

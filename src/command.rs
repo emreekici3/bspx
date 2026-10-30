@@ -1,5 +1,6 @@
 //! Commands accepted over the socket (`bspx <command>`).
 
+use crate::config::check_app_pattern;
 use crate::geometry::Direction;
 
 /// How far `bspx zoom` grows a window.
@@ -216,10 +217,9 @@ impl Command {
                 if words.len() < 4 {
                     return Err("rule grid: missing app name".into());
                 }
-                return Ok(Command::GridRule {
-                    grid,
-                    app: words[3..].join(" "),
-                });
+                let app = words[3..].join(" ");
+                check_app_pattern(&app)?;
+                return Ok(Command::GridRule { grid, app });
             }
             Some("rule") if words.get(1) == Some(&"space") => {
                 let space = words
@@ -228,9 +228,11 @@ impl Command {
                 if words.len() < 4 {
                     return Err("rule space: missing app name".into());
                 }
+                let app = words[3..].join(" ");
+                check_app_pattern(&app)?;
                 return Ok(Command::SpaceRule {
                     space: (*space).to_string(),
-                    app: words[3..].join(" "),
+                    app,
                 });
             }
             Some("rule") => {
@@ -244,6 +246,7 @@ impl Command {
                 }
                 // App names may contain spaces ("System Settings").
                 let app = words[2..].join(" ");
+                check_app_pattern(&app)?;
                 return Ok(Command::Rule { float, app });
             }
             Some(other) => return Err(format!("unknown command '{other}'")),
@@ -421,6 +424,20 @@ mod tests {
                 app: "System Settings".into()
             })
         );
+    }
+
+    #[test]
+    fn regex_rules() {
+        assert_eq!(
+            Command::parse("rule float /Cisco Webex/"),
+            Ok(Command::Rule {
+                float: true,
+                app: "/Cisco Webex/".into()
+            })
+        );
+        assert!(Command::parse("rule float /(/").is_err());
+        assert!(Command::parse("rule space 2 /[/").is_err());
+        assert!(Command::parse("rule grid 2:2:0:0:1:1 //").is_err());
     }
 
     #[test]
