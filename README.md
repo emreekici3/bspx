@@ -82,6 +82,7 @@ If windows stop moving after an update, macOS has dropped the permission for the
 | `bspx config <key> [value]` | Show or change a setting |
 | `bspx rule float\|tile "<app>"` | Never tile an app's windows, or tile them again |
 | `bspx rule space <space> "<app>"` | Send an app's new windows to a Space |
+| `bspx rule grid <rows:cols:x:y:w:h> "<app>"` | Open an app's new windows floating at a grid cell, e.g. `4:4:3:0:1:1` is the top-right quarter of the top-right quarter |
 | `bspx label [<n> <name>]` | Name Space `n`; alone, list the Spaces |
 | `bspx bind ['<hotkey>']` | Add a keyboard shortcut; alone, list them |
 | `bspx space <space>` | Switch to a Space |
@@ -136,6 +137,14 @@ A command that is just `bspx ...` runs inside bspx, without starting a process; 
 - Drag the edge of a tiled window to move the split border.
 - Hold `alt` and drag anywhere on a window to move it; drop it on another window to swap them.
 - Hold `alt` and right-drag to resize a window from its nearest corner; the windows next to it follow.
+
+To split a window instead of swapping with it, pick a second key:
+
+```sh
+bspx config mouse_insert_modifier cmd
+```
+
+Hold it along with `alt` and drop a window near an edge of another: that window is split in two and the dropped one takes the half on that side (the highlight shows which).
 
 While `alt` is held, clicks do not reach apps. If an app needs `alt`-clicks, pick another key with `mouse_modifier`.
 

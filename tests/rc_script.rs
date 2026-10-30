@@ -65,6 +65,7 @@ fn bspxrc_configures_the_daemon() {
                 frame: Rect::new(50, 50, 200, 200),
                 app: app.into(),
                 tileable: true,
+                movable: true,
             });
         }
     }

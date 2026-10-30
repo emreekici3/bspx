@@ -300,6 +300,33 @@ impl BspTree {
         true
     }
 
+    /// Puts `new` beside `target`, on its `side`: the two share the target's
+    /// old slot equally. Returns `false` if `new` is already managed or
+    /// `target` is not.
+    pub fn insert_at(&mut self, new: WinId, target: WinId, side: Direction) -> bool {
+        if new == target || self.contains(new) {
+            return false;
+        }
+        let Some(path) = self.path(target) else {
+            return false;
+        };
+        let split = match side {
+            Direction::Left | Direction::Right => Split::Columns,
+            Direction::Up | Direction::Down => Split::Rows,
+        };
+        let (a, b) = match side {
+            Direction::Left | Direction::Up => (new, target),
+            Direction::Right | Direction::Down => (target, new),
+        };
+        *self.node_at_mut(&path) = Node::Split {
+            split,
+            ratio: 0.5,
+            a: Box::new(Node::Leaf(a)),
+            b: Box::new(Node::Leaf(b)),
+        };
+        true
+    }
+
     /// Removes a window; its sibling takes over the parent's whole area.
     pub fn remove(&mut self, win: WinId) -> bool {
         fn rec(node: Node, win: WinId) -> (Option<Node>, bool) {

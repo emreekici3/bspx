@@ -35,6 +35,9 @@ pub struct Config {
     pub drag_color: [f32; 4],
     /// Held with a click anywhere on a window, moves or resizes it.
     pub mouse_modifier: Option<Modifier>,
+    /// Held as well while moving a tiled window with the modifier, dropping
+    /// it on another window splits that one instead of swapping with it.
+    pub mouse_insert_modifier: Option<Modifier>,
     /// What dragging with the left button (with the modifier) does.
     pub mouse_action1: MouseAction,
     /// What dragging with the right button (with the modifier) does.
@@ -50,6 +53,9 @@ pub struct Config {
     pub labels: BTreeMap<usize, String>,
     /// Apps whose new windows go to a Space: (app, Space number or label).
     pub space_rules: Vec<(String, String)>,
+    /// Apps whose new windows float at a grid cell:
+    /// (app, [rows, cols, x, y, w, h]).
+    pub grid_rules: Vec<(String, [u32; 6])>,
     /// Spaces (numbers or labels) whose windows are not tiled.
     pub float_spaces: Vec<String>,
     /// Keyboard shortcut lines (`bspx bind`).
@@ -99,6 +105,7 @@ impl Default for Config {
             drag_swap: true,
             drag_color: [0.37, 0.62, 1.0, 0.25],
             mouse_modifier: Some(Modifier::Alt),
+            mouse_insert_modifier: None,
             mouse_action1: MouseAction::Move,
             mouse_action2: MouseAction::Resize,
             mouse_follows_focus: false,
@@ -106,6 +113,7 @@ impl Default for Config {
             log_level: None,
             labels: BTreeMap::new(),
             space_rules: Vec::new(),
+            grid_rules: Vec::new(),
             float_spaces: Vec::new(),
             hotkeys: Vec::new(),
         }
@@ -135,6 +143,7 @@ pub const KEYS: &[&str] = &[
     "drag_swap",
     "drag_color",
     "mouse_modifier",
+    "mouse_insert_modifier",
     "mouse_action1",
     "mouse_action2",
     "mouse_follows_focus",
@@ -297,16 +306,19 @@ impl Config {
                     format!("drag_color: '{v}' is not a colour like 5e9eff or 5e9eff40")
                 })?;
             }
-            "mouse_modifier" => {
+            "mouse_modifier" | "mouse_insert_modifier" => {
                 let v = one(key, args)?;
-                self.mouse_modifier = match v {
+                let modifier = match v {
                     "off" | "none" => None,
                     v => Some(Modifier::parse(v).ok_or_else(|| {
-                        format!(
-                            "mouse_modifier: expected alt, cmd, ctrl, shift, fn or off, got '{v}'"
-                        )
+                        format!("{key}: expected alt, cmd, ctrl, shift, fn or off, got '{v}'")
                     })?),
                 };
+                if key == "mouse_modifier" {
+                    self.mouse_modifier = modifier;
+                } else {
+                    self.mouse_insert_modifier = modifier;
+                }
             }
             "mouse_action1" | "mouse_action2" => {
                 let v = one(key, args)?;
@@ -359,6 +371,10 @@ impl Config {
                 .mouse_modifier
                 .map_or("off", Modifier::name)
                 .to_string(),
+            "mouse_insert_modifier" => self
+                .mouse_insert_modifier
+                .map_or("off", Modifier::name)
+                .to_string(),
             "mouse_action1" => self.mouse_action1.name().to_string(),
             "mouse_action2" => self.mouse_action2.name().to_string(),
             _ => {
@@ -380,6 +396,12 @@ impl Config {
     pub fn set_space_rule(&mut self, app: &str, space: &str) {
         self.space_rules.retain(|(a, _)| a != app);
         self.space_rules.push((app.to_string(), space.to_string()));
+    }
+
+    /// `bspx rule grid <rows:cols:x:y:w:h> <app>`.
+    pub fn set_grid_rule(&mut self, app: &str, grid: [u32; 6]) {
+        self.grid_rules.retain(|(a, _)| a != app);
+        self.grid_rules.push((app.to_string(), grid));
     }
 
     /// `bspx layout <space> float|bsp`.
@@ -511,6 +533,11 @@ mod tests {
         assert_eq!(c.mouse_modifier, None);
         assert_eq!(c.get("mouse_modifier").unwrap(), "off");
         assert!(c.set("mouse_modifier", &["hyper"]).is_err());
+        assert_eq!(c.get("mouse_insert_modifier").unwrap(), "off");
+        c.set("mouse_insert_modifier", &["cmd"]).unwrap();
+        assert_eq!(c.mouse_insert_modifier, Some(Modifier::Cmd));
+        assert_eq!(c.get("mouse_insert_modifier").unwrap(), "cmd");
+        assert!(c.set("mouse_insert_modifier", &["hyper"]).is_err());
         c.set("mouse_action1", &["resize"]).unwrap();
         c.set("mouse_action2", &["move"]).unwrap();
         assert_eq!(c.mouse_action(MouseButton::Left), MouseAction::Resize);

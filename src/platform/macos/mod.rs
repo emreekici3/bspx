@@ -768,6 +768,7 @@ struct TrackedWindow {
     element: Cf,
     pid: i32,
     tileable: bool,
+    movable: bool,
 }
 
 /// How many polls to keep looking for the AX element of a new CG window
@@ -892,8 +893,8 @@ impl MacBackend {
                 let Some(element) = Cf::retained(element) else {
                     continue;
                 };
-                let tileable = self.is_tileable(element.ptr());
-                debug!("tracking window {id} (pid {pid}, tileable {tileable})");
+                let (tileable, movable) = self.classify(element.ptr());
+                debug!("tracking window {id} (pid {pid}, tileable {tileable}, movable {movable})");
                 if let Some(obs) = self.apps.get(&pid).and_then(|a| a.observer.as_ref()) {
                     observe(obs, element.ptr(), &self.names.destroyed, id as usize);
                     observe(obs, element.ptr(), &self.names.miniaturized, CHANGED_TAG);
@@ -905,23 +906,27 @@ impl MacBackend {
                         element,
                         pid,
                         tileable,
+                        movable,
                     },
                 );
             }
         }
     }
 
-    fn is_tileable(&self, element: AXUIElementRef) -> bool {
+    /// Whether a window can be tiled (moved and resized), and whether it
+    /// can at least be moved. Only standard, non-fullscreen windows count.
+    fn classify(&self, element: AXUIElementRef) -> (bool, bool) {
         let subrole = copy_attr(element, &self.names.subrole).and_then(|v| string_value(v.ptr()));
         if subrole.as_deref() != Some(self.names.standard_window) {
-            return false;
+            return (false, false);
         }
         if copy_attr(element, &self.names.fullscreen).and_then(|v| bool_value(v.ptr()))
             == Some(true)
         {
-            return false;
+            return (false, false);
         }
-        is_settable(element, &self.names.size) && is_settable(element, &self.names.position)
+        let movable = is_settable(element, &self.names.position);
+        (movable && is_settable(element, &self.names.size), movable)
     }
 }
 
@@ -1029,13 +1034,13 @@ impl Backend for MacBackend {
             .map(|w| {
                 let (cx, cy) = w.frame.center();
                 let on_tiled_display = display.w == 0 || display.contains_point(cx, cy);
-                let tileable =
-                    on_tiled_display && self.windows.get(&w.id).is_some_and(|t| t.tileable);
+                let tracked = self.windows.get(&w.id).filter(|_| on_tiled_display);
                 WindowInfo {
                     id: w.id,
                     frame: w.frame,
                     app: w.app,
-                    tileable,
+                    tileable: tracked.is_some_and(|t| t.tileable),
+                    movable: tracked.is_some_and(|t| t.movable),
                 }
             })
             .collect()
@@ -1179,6 +1184,10 @@ impl Backend for MacBackend {
 
     fn set_mouse_modifier(&mut self, modifier: Option<Modifier>) {
         tap::set_modifier(modifier);
+    }
+
+    fn modifier_held(&mut self, modifier: Modifier) -> bool {
+        tap::held(modifier)
     }
 
     fn warp_cursor(&mut self, x: f32, y: f32) {

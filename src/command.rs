@@ -45,6 +45,9 @@ pub enum Command {
     /// Send the windows of an app to a Space when they open. `space` is a
     /// Space number or label, looked up when a window opens.
     SpaceRule { space: String, app: String },
+    /// Float the windows of an app at a grid cell when they open:
+    /// `[rows, cols, x, y, w, h]`, as in yabai's `grid=`.
+    GridRule { grid: [u32; 6], app: String },
     /// Name a Space (numbered from 1, as in Mission Control); `None` lists
     /// the Spaces and their names.
     Label(Option<(usize, String)>),
@@ -82,6 +85,9 @@ settings (put these in ~/.config/bspx/bspxrc):
                              animation_speed, split_ratio, resize_step, poll_interval
   rule <float|tile> <app>    e.g. rule float System Settings
   rule space <space> <app>   e.g. rule space web Safari
+  rule grid <r:c:x:y:w:h> <app>
+                             open an app's windows floating at a grid cell,
+                             e.g. rule grid 4:4:3:0:1:1 Calculator (top right)
   label [<n> <name>]         name Space n, e.g. label 2 web; alone, list Spaces
   bind ['<hotkey>']          a keyboard shortcut, e.g. bind 'alt - h : bspx focus left';
                              alone, list them
@@ -190,6 +196,17 @@ impl Command {
                     );
                 }
             },
+            Some("rule") if words.get(1) == Some(&"grid") => {
+                let spec = words.get(2).ok_or("rule grid: missing rows:cols:x:y:w:h")?;
+                let grid = parse_grid(spec)?;
+                if words.len() < 4 {
+                    return Err("rule grid: missing app name".into());
+                }
+                return Ok(Command::GridRule {
+                    grid,
+                    app: words[3..].join(" "),
+                });
+            }
             Some("rule") if words.get(1) == Some(&"space") => {
                 let space = words
                     .get(2)
@@ -206,7 +223,7 @@ impl Command {
                 let float = match words.get(1).copied() {
                     Some("float") => true,
                     Some("tile") => false,
-                    _ => return Err("rule: expected 'float', 'tile' or 'space'".into()),
+                    _ => return Err("rule: expected 'float', 'tile', 'space' or 'grid'".into()),
                 };
                 if words.len() < 3 {
                     return Err("rule: missing app name".into());
@@ -233,6 +250,26 @@ impl Command {
     }
 }
 
+/// Parses `rows:cols:x:y:w:h`, checking that the cell lies inside the grid.
+pub fn parse_grid(spec: &str) -> Result<[u32; 6], String> {
+    let bad = || format!("rule grid: expected rows:cols:x:y:w:h, got '{spec}'");
+    let nums = spec
+        .split(':')
+        .map(|n| n.parse::<u32>().map_err(|_| bad()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let grid: [u32; 6] = nums.try_into().map_err(|_| bad())?;
+    let [rows, cols, x, y, w, h] = grid;
+    if rows == 0 || cols == 0 || w == 0 || h == 0 {
+        return Err("rule grid: rows, cols, width and height must be at least 1".into());
+    }
+    if x + w > cols || y + h > rows {
+        return Err(format!(
+            "rule grid: cell {x}:{y}:{w}:{h} does not fit a {rows}x{cols} grid"
+        ));
+    }
+    Ok(grid)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,6 +293,22 @@ mod tests {
             })
         );
         assert!(Command::parse("rule space web").is_err());
+    }
+
+    #[test]
+    fn parses_grid_rules() {
+        assert_eq!(
+            Command::parse("rule grid 4:4:3:0:1:1 System Settings"),
+            Ok(Command::GridRule {
+                grid: [4, 4, 3, 0, 1, 1],
+                app: "System Settings".into(),
+            })
+        );
+        assert!(Command::parse("rule grid 4:4:3:0:1:1").is_err());
+        assert!(Command::parse("rule grid 4:4:3:0:2:1 Finder").is_err());
+        assert!(Command::parse("rule grid 0:4:0:0:1:1 Finder").is_err());
+        assert!(Command::parse("rule grid 4:4:0:0:1 Finder").is_err());
+        assert!(Command::parse("rule grid a:4:0:0:1:1 Finder").is_err());
         assert_eq!(Command::parse("send 3"), Ok(Command::Send("3".into())));
         assert_eq!(
             Command::parse("space web"),

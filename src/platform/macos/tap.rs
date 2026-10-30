@@ -35,6 +35,7 @@ unsafe extern "C" {
     fn CGEventTapEnable(tap: CFTypeRef, enable: bool);
     fn CGEventGetFlags(event: CFTypeRef) -> u64;
     fn CGEventGetLocation(event: CFTypeRef) -> CGPoint;
+    fn CGEventSourceFlagsState(state: i32) -> u64;
 }
 
 #[cfg_attr(target_os = "macos", link(name = "CoreFoundation", kind = "framework"))]
@@ -107,6 +108,14 @@ pub fn set_modifier(modifier: Option<Modifier>) {
 
 /// The button of the gesture in progress, or of one that ended since the
 /// last call.
+/// `kCGEventSourceStateCombinedSessionState`: the keys held in this session.
+const COMBINED_SESSION_STATE: i32 = 0;
+
+/// Whether `modifier` is held right now.
+pub fn held(modifier: Modifier) -> bool {
+    unsafe { CGEventSourceFlagsState(COMBINED_SESSION_STATE) & flag(modifier) != 0 }
+}
+
 pub fn gesture() -> Option<MouseButton> {
     let latched = LATCHED.swap(0, Relaxed);
     button(ACTIVE.load(Relaxed)).or(button(latched))

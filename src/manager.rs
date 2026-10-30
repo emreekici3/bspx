@@ -9,7 +9,7 @@ use crate::bsp::{self, BspTree, MinSizes, WinId};
 use crate::command::{Command, Zoom};
 use crate::config::{Config, MouseAction};
 use crate::geometry::{Direction, Rect};
-use crate::platform::{Backend, Modifier, MouseButton, Overlay, WindowEvent};
+use crate::platform::{Backend, Modifier, MouseButton, Overlay, WindowEvent, WindowInfo};
 
 /// The layout of a Space (virtual desktop) that is not on screen.
 #[derive(Debug, Default)]
@@ -43,6 +43,8 @@ pub struct Manager<B: Backend> {
     /// Smallest sizes windows turned out to accept: an app that refuses to
     /// shrink further keeps its size, and the layout must give it that.
     min_sizes: MinSizes,
+    /// The drop highlight on screen, if any.
+    shown_overlay: Option<Overlay>,
     /// What the system last said had focus; see `sync_focus`.
     reported_focus: Option<WinId>,
     /// The window focused before the system's focus last moved, and when
@@ -115,6 +117,9 @@ struct Grab {
     vertical: Direction,
     /// For a tiled window being moved, the window it would swap with.
     target: Option<WinId>,
+    /// With the insert modifier held, the side of `target` it would go to
+    /// instead, splitting that window.
+    side: Option<Direction>,
     /// The pointer has gone further than a click's wobble.
     moved: bool,
 }
@@ -152,6 +157,7 @@ impl<B: Backend> Manager<B> {
             closed: HashSet::new(),
             focused: None,
             min_sizes: MinSizes::new(),
+            shown_overlay: None,
             reported_focus: None,
             focus_moved: None,
             zoomed: None,
@@ -382,8 +388,17 @@ impl<B: Backend> Manager<B> {
             // A window counts as seen once bspx can manage it: a new one is
             // often listed a poll or two before its Accessibility element
             // turns up, and the rule must still apply then.
-            if info.tileable && self.seen.insert(info.id) && self.send_by_rule(info.id, &info.app) {
-                continue;
+            if info.movable && !self.seen.contains(&info.id) {
+                // A grid rule floats the window at its cell (a fixed-size
+                // one too); a Space rule then may still send it away (it
+                // keeps its place there).
+                let placed = self.place_by_grid(&info);
+                if placed || info.tileable {
+                    self.seen.insert(info.id);
+                }
+                if (info.tileable && self.send_by_rule(info.id, &info.app)) || placed {
+                    continue;
+                }
             }
             let wanted = info.tileable
                 && !float_spaces.contains(&space)
@@ -438,6 +453,36 @@ impl<B: Backend> Manager<B> {
             .get(n - 1)
             .ok_or_else(|| format!("there is no Space {n}"))?;
         Ok((n, id))
+    }
+
+    /// Floats a newly opened window at the grid cell its app's rule names.
+    /// One that cannot be resized keeps its size and is put against the
+    /// screen edges the cell touches (centred in it along the others).
+    /// Returns whether it was placed.
+    fn place_by_grid(&mut self, info: &WindowInfo) -> bool {
+        let (id, app) = (info.id, info.app.as_str());
+        let Some(grid) = self
+            .config
+            .grid_rules
+            .iter()
+            .find(|(a, _)| a == app)
+            .map(|(_, g)| *g)
+        else {
+            return false;
+        };
+        let area = self.inner_area();
+        let cell = area.grid_cell(grid);
+        let frame = if info.tileable {
+            cell
+        } else {
+            area.align_in(cell, info.frame.w, info.frame.h)
+        };
+        self.floating.insert(id);
+        self.anim.cancel(id);
+        self.backend.update_frame(id, frame, info.frame);
+        self.frames.insert(id, frame);
+        info!("window {id} of {app} floats at grid {grid:?}: {frame:?}");
+        true
     }
 
     /// Sends a newly opened window to the Space its app's rule names.
@@ -520,7 +565,7 @@ impl<B: Backend> Manager<B> {
                     }
                     if self.drag != Drag::None {
                         self.drag = Drag::Other;
-                        self.backend.show_overlay(None);
+                        self.set_overlay(None);
                     }
                 }
                 WindowEvent::Changed => refresh = true,
@@ -539,7 +584,7 @@ impl<B: Backend> Manager<B> {
             self.anim.cancel(id);
         }
         if std::mem::replace(&mut self.drag, Drag::None) != Drag::None {
-            self.backend.show_overlay(None);
+            self.set_overlay(None);
         }
         let old = SpaceState {
             tree: std::mem::take(&mut self.tree),
@@ -817,7 +862,7 @@ impl<B: Backend> Manager<B> {
                 let Some(cursor) = self.backend.cursor() else {
                     return;
                 };
-                let target = self.show_drop_target(win, target, cursor);
+                let target = self.show_drop_target(win, (target, None), cursor, false).0;
                 self.drag = Drag::Moving { win, target };
             }
             Drag::None | Drag::Other | Drag::Gesture(_) => {}
@@ -877,6 +922,7 @@ impl<B: Backend> Manager<B> {
             horizontal,
             vertical,
             target: None,
+            side: None,
             moved: false,
         });
     }
@@ -901,8 +947,13 @@ impl<B: Backend> Manager<B> {
                     self.backend.update_frame(grab.win, frame, prev);
                     self.frames.insert(grab.win, frame);
                 }
-                if grab.tiled && self.config.drag_swap {
-                    grab.target = self.show_drop_target(grab.win, grab.target, (x, y));
+                let insert = self
+                    .config
+                    .mouse_insert_modifier
+                    .is_some_and(|k| self.backend.modifier_held(k));
+                if grab.tiled && (self.config.drag_swap || insert) {
+                    (grab.target, grab.side) =
+                        self.show_drop_target(grab.win, (grab.target, grab.side), (x, y), insert);
                 }
             }
             MouseAction::Resize => {
@@ -972,11 +1023,26 @@ impl<B: Backend> Manager<B> {
             now.h
         );
         if grab.action == MouseAction::Move && grab.tiled {
-            self.backend.show_overlay(None);
+            self.set_overlay(None);
             let target = grab.target.filter(|t| self.tree.contains(*t));
             if let Some(other) = target.filter(|_| self.tree.contains(grab.win)) {
-                info!("swapping window {} with {other}", grab.win);
-                self.tree.swap(grab.win, other);
+                match grab.side {
+                    Some(side) => {
+                        info!("putting window {} {side:?} of {other}", grab.win);
+                        if self
+                            .zoomed
+                            .is_some_and(|(w, _)| w == grab.win || w == other)
+                        {
+                            self.zoomed = None;
+                        }
+                        self.tree.remove(grab.win);
+                        self.tree.insert_at(grab.win, other, side);
+                    }
+                    None => {
+                        info!("swapping window {} with {other}", grab.win);
+                        self.tree.swap(grab.win, other);
+                    }
+                }
             }
             // Back into a slot, animated from where it was let go.
             self.relayout();
@@ -984,32 +1050,61 @@ impl<B: Backend> Manager<B> {
     }
 
     /// Highlights the tiled window under the pointer that `win` would swap
-    /// with if dropped now, and returns it.
+    /// with if dropped now, and returns it. With `insert`, only the half of
+    /// it `win` would take is highlighted, and that side is returned too.
+    ///
+    /// The highlight covers the window where it really is, which is not
+    /// always its slot: some apps round their size to a text grid, others
+    /// will not shrink to it. The pointer is matched against the same frames,
+    /// so what is highlighted is what a drop hits.
     fn show_drop_target(
         &mut self,
         win: WinId,
-        current: Option<WinId>,
+        _current: (Option<WinId>, Option<Direction>),
         (x, y): (f32, f32),
-    ) -> Option<WinId> {
+        insert: bool,
+    ) -> (Option<WinId>, Option<Direction>) {
         let under = self
             .targets()
             .into_iter()
-            .find(|(id, r)| *id != win && r.contains_point(x, y));
-        let target = under.map(|(id, _)| id);
-        if target != current {
-            self.backend.show_overlay(under.map(|(id, rect)| Overlay {
-                rect,
-                above: id,
-                color: self.config.drag_color,
-            }));
+            .filter(|(id, _)| *id != win)
+            .map(|(id, slot)| (id, slot, self.drawn_frame(id, slot)))
+            .filter(|(_, _, frame)| frame.contains_point(x, y))
+            // Where frames overlap, the window whose slot it is wins.
+            .max_by_key(|(_, slot, _)| slot.contains_point(x, y));
+        let side = under
+            .filter(|_| insert)
+            .map(|(_, _, frame)| frame.nearest_side(x, y));
+        self.set_overlay(under.map(|(id, _, frame)| Overlay {
+            rect: side.map_or(frame, |s| frame.half(s)),
+            above: id,
+            color: self.config.drag_color,
+        }));
+        (under.map(|(id, _, _)| id), side)
+    }
+
+    /// Where a tiled window is on screen: its last known frame, or its slot
+    /// while it is still sliding there.
+    fn drawn_frame(&self, id: WinId, slot: Rect) -> Rect {
+        if self.anim.is_animating(id) {
+            return slot;
         }
-        target
+        self.frames.get(&id).copied().unwrap_or(slot)
+    }
+
+    /// Shows or hides the drop highlight, touching the screen only when it
+    /// changes.
+    fn set_overlay(&mut self, overlay: Option<Overlay>) {
+        if overlay != self.shown_overlay {
+            self.shown_overlay = overlay;
+            self.backend.show_overlay(overlay);
+        }
     }
 
     fn release(&mut self) {
         match std::mem::replace(&mut self.drag, Drag::None) {
             Drag::Moving { win, target } => {
-                self.backend.show_overlay(None);
+                self.set_overlay(None);
                 // Animate from where the user let go.
                 if let Some(now) = self.backend.window_frame(win) {
                     self.frames.insert(win, now);
@@ -1369,6 +1464,10 @@ impl<B: Backend> Manager<B> {
                 self.config.set_space_rule(app, space);
                 return Ok(String::new());
             }
+            Command::GridRule { grid, ref app } => {
+                self.config.set_grid_rule(app, grid);
+                return Ok(String::new());
+            }
             Command::Send(ref space) => {
                 let win = self
                     .backend
@@ -1473,6 +1572,8 @@ pub(crate) mod tests {
         pub min: HashMap<WinId, (i32, i32)>,
         /// The gesture modifier bspx asked for.
         pub modifier: Option<Modifier>,
+        /// Modifier keys held down.
+        pub held: Vec<Modifier>,
         /// The button held with the modifier, reported only while the
         /// modifier is set, like the real event tap.
         pub gesture: Option<MouseButton>,
@@ -1492,6 +1593,7 @@ pub(crate) mod tests {
                 frame: Rect::new(100, 100, 300, 200),
                 app: app.into(),
                 tileable: true,
+                movable: true,
             });
             self.space_of.insert(id, self.active);
             self.focused = Some(id);
@@ -1547,6 +1649,9 @@ pub(crate) mod tests {
         }
         fn set_mouse_modifier(&mut self, modifier: Option<Modifier>) {
             self.modifier = modifier;
+        }
+        fn modifier_held(&mut self, modifier: Modifier) -> bool {
+            self.held.contains(&modifier)
         }
         fn spaces(&mut self) -> Vec<u64> {
             if self.spaces.is_empty() {
@@ -2157,6 +2262,159 @@ pub(crate) mod tests {
         m.track_pointer();
     }
 
+    /// One window on the left, two stacked on the right, with
+    /// `mouse_insert_modifier cmd`.
+    fn left_one_right_two() -> Manager<MockBackend> {
+        let mut m = manager(0.0);
+        let mut config = m.config().clone();
+        config.mouse_insert_modifier = Some(Modifier::Cmd);
+        m.set_config(config);
+        m.backend.open(1, "Terminal");
+        m.refresh();
+        m.backend.open(2, "Safari");
+        m.refresh();
+        m.backend.focused = Some(2);
+        m.backend.open(3, "Notes");
+        m.refresh();
+        m.track_pointer();
+        assert_eq!(m.backend().frame(1), Rect::new(0, 25, 495, 600));
+        assert_eq!(m.backend().frame(2), Rect::new(505, 25, 495, 295));
+        assert_eq!(m.backend().frame(3), Rect::new(505, 330, 495, 295));
+        m
+    }
+
+    #[test]
+    fn insert_drag_splits_the_window_it_is_dropped_on() {
+        let mut m = left_one_right_two();
+        m.backend.held = vec![Modifier::Cmd];
+        // Grab the top right window, drop it on the bottom half of the left one.
+        m.backend.cursor = (700.0, 150.0);
+        m.backend.gesture = Some(MouseButton::Left);
+        m.backend.mouse = true;
+        m.track_pointer();
+        m.backend.cursor = (200.0, 520.0);
+        m.track_pointer();
+        let overlay = m.backend().overlay.unwrap();
+        assert_eq!(overlay.above, 1);
+        assert_eq!(overlay.rect, Rect::new(0, 325, 495, 300), "the bottom half");
+        m.backend.gesture = None;
+        m.backend.mouse = false;
+        m.track_pointer();
+        assert_eq!(m.backend().overlay, None);
+        assert_eq!(m.backend().frame(1), Rect::new(0, 25, 495, 295));
+        assert_eq!(m.backend().frame(2), Rect::new(0, 330, 495, 295));
+        assert_eq!(m.backend().frame(3), Rect::new(505, 25, 495, 600));
+    }
+
+    #[test]
+    fn highlight_covers_a_window_that_did_not_fill_its_slot() {
+        let mut m = left_one_right_two();
+        // Like Terminal rounding its width to whole characters.
+        let terminal = Rect::new(0, 25, 481, 593);
+        m.backend.set_frame(1, terminal);
+        m.refresh();
+        assert_eq!(m.backend().frame(1), terminal);
+
+        // Moved by its title bar.
+        m.backend.cursor = (700.0, 35.0);
+        m.backend.mouse = true;
+        m.track_pointer();
+        m.backend.set_frame(2, Rect::new(150, 300, 495, 295));
+        m.backend.cursor = (200.0, 400.0);
+        m.track_pointer();
+        assert_eq!(m.backend().overlay.unwrap().rect, terminal);
+        // Off its right edge, in what is left of its slot: no target.
+        m.backend.cursor = (488.0, 400.0);
+        m.track_pointer();
+        assert_eq!(m.backend().overlay, None);
+        m.backend.mouse = false;
+        m.track_pointer();
+        settle(&mut m);
+        // Laid out again, the app rounds its size again.
+        m.backend.set_frame(1, terminal);
+        m.refresh();
+
+        // Moved with the modifier, swapping.
+        m.backend.cursor = (700.0, 150.0);
+        m.backend.gesture = Some(MouseButton::Left);
+        m.backend.mouse = true;
+        m.track_pointer();
+        m.backend.cursor = (200.0, 400.0);
+        m.track_pointer();
+        assert_eq!(m.backend().overlay.unwrap().rect, terminal);
+        // And splitting it: the bottom half of where it really is.
+        m.backend.held = vec![Modifier::Cmd];
+        m.backend.cursor = (200.0, 520.0);
+        m.track_pointer();
+        assert_eq!(
+            m.backend().overlay.unwrap().rect,
+            Rect::new(0, 321, 481, 297)
+        );
+        m.backend.gesture = None;
+        m.backend.mouse = false;
+        m.track_pointer();
+        assert_eq!(m.backend().overlay, None);
+    }
+
+    #[test]
+    fn highlight_follows_a_window_that_changes_under_it() {
+        let mut m = left_one_right_two();
+        m.backend.cursor = (700.0, 150.0);
+        m.backend.gesture = Some(MouseButton::Left);
+        m.backend.mouse = true;
+        m.track_pointer();
+        m.backend.cursor = (200.0, 400.0);
+        m.track_pointer();
+        assert_eq!(
+            m.backend().overlay.unwrap().rect,
+            Rect::new(0, 25, 495, 600)
+        );
+        let changes = m.backend().overlay_changes;
+        // Holding still: nothing is redrawn.
+        m.track_pointer();
+        assert_eq!(m.backend().overlay_changes, changes);
+        // The app settles a little narrower while the pointer rests on it.
+        m.backend.set_frame(1, Rect::new(0, 25, 481, 593));
+        m.refresh();
+        m.track_pointer();
+        assert_eq!(
+            m.backend().overlay.unwrap().rect,
+            Rect::new(0, 25, 481, 593)
+        );
+        m.backend.gesture = None;
+        m.backend.mouse = false;
+        m.track_pointer();
+    }
+
+    #[test]
+    fn insert_drag_onto_the_top_half_goes_above() {
+        let mut m = left_one_right_two();
+        m.backend.held = vec![Modifier::Cmd];
+        gesture(&mut m, MouseButton::Left, (700.0, 150.0), &[(200.0, 100.0)]);
+        assert_eq!(m.backend().frame(2), Rect::new(0, 25, 495, 295));
+        assert_eq!(m.backend().frame(1), Rect::new(0, 330, 495, 295));
+        assert_eq!(m.backend().frame(3), Rect::new(505, 25, 495, 600));
+    }
+
+    #[test]
+    fn insert_drag_onto_a_side_goes_beside() {
+        let mut m = left_one_right_two();
+        m.backend.held = vec![Modifier::Cmd];
+        // The bottom right window onto the left edge of the left one.
+        gesture(&mut m, MouseButton::Left, (700.0, 500.0), &[(30.0, 325.0)]);
+        assert_eq!(m.tree().windows(), vec![3, 1, 2]);
+        assert_eq!(m.backend().frame(3).x, 0);
+        assert_eq!(m.backend().frame(2), Rect::new(505, 25, 495, 600));
+    }
+
+    #[test]
+    fn drag_without_the_insert_modifier_still_swaps() {
+        let mut m = left_one_right_two();
+        gesture(&mut m, MouseButton::Left, (700.0, 150.0), &[(200.0, 520.0)]);
+        assert_eq!(m.backend().frame(2), Rect::new(0, 25, 495, 600));
+        assert_eq!(m.backend().frame(1), Rect::new(505, 25, 495, 295));
+    }
+
     #[test]
     fn modifier_drag_moves_a_tiled_window_from_anywhere_and_swaps() {
         let mut m = manager(0.0);
@@ -2491,6 +2749,7 @@ pub(crate) mod tests {
             frame: Rect::new(0, 0, 1000, 700),
             app: "borders".into(),
             tileable: false,
+            movable: false,
         });
         m.backend.open(1, "Terminal");
         m.backend.open(2, "Safari");
@@ -2571,6 +2830,67 @@ pub(crate) mod tests {
         m.refresh();
         assert_eq!(m.backend().space_of[&3], 20);
         assert_eq!(m.tree().windows(), vec![2, 3]);
+    }
+
+    #[test]
+    fn grid_rule_floats_new_windows_at_their_cell() {
+        let mut m = manager(0.0);
+        m.execute(&Command::GridRule {
+            grid: [2, 2, 1, 0, 1, 1],
+            app: "Notes".into(),
+        })
+        .unwrap();
+        m.backend.open(1, "Terminal");
+        m.refresh();
+        m.backend.open(2, "Notes");
+        m.refresh();
+        assert_eq!(m.tree().windows(), vec![1]);
+        assert_eq!(m.backend().frame(2), Rect::new(500, 25, 500, 300));
+        // It stays a floating window: later polls leave it be.
+        m.backend.set_frame(2, Rect::new(10, 40, 400, 300));
+        m.refresh();
+        assert_eq!(m.tree().windows(), vec![1]);
+        assert_eq!(m.backend().frame(2), Rect::new(10, 40, 400, 300));
+        // And can be tiled by hand.
+        m.backend.focused = Some(2);
+        m.execute(&Command::ToggleFloat).unwrap();
+        assert_eq!(m.tree().windows(), vec![1, 2]);
+    }
+
+    #[test]
+    fn grid_rule_puts_fixed_size_windows_in_the_corner() {
+        let mut m = manager(0.0);
+        m.execute(&Command::GridRule {
+            grid: [4, 4, 3, 3, 1, 1],
+            app: "Hesap Makinesi".into(),
+        })
+        .unwrap();
+        m.refresh();
+        m.backend.windows.push(WindowInfo {
+            id: 7,
+            frame: Rect::new(100, 100, 230, 408),
+            app: "Hesap Makinesi".into(),
+            tileable: false,
+            movable: true,
+        });
+        m.refresh();
+        // Area 0,25 1000x600: right and bottom edges at 1000 and 625.
+        assert_eq!(m.backend().frame(7), Rect::new(770, 217, 230, 408));
+        assert!(m.tree().is_empty());
+    }
+
+    #[test]
+    fn grid_rule_leaves_windows_open_before_it_alone() {
+        let mut m = manager(0.0);
+        m.backend.open(1, "Notes");
+        m.refresh();
+        m.execute(&Command::GridRule {
+            grid: [2, 2, 1, 0, 1, 1],
+            app: "Notes".into(),
+        })
+        .unwrap();
+        m.refresh();
+        assert_eq!(m.tree().windows(), vec![1]);
     }
 
     #[test]

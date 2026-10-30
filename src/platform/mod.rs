@@ -17,6 +17,9 @@ pub struct WindowInfo {
     /// A normal, resizable document window (not a dialog, sheet, panel,
     /// minimized or fullscreen window).
     pub tileable: bool,
+    /// A normal window bspx can move, though perhaps not resize (a
+    /// fixed-size one such as Calculator). Every tileable window is movable.
+    pub movable: bool,
 }
 
 pub trait Backend {
@@ -103,6 +106,10 @@ pub trait Backend {
     /// Sets the modifier key that turns a click anywhere on a window into a
     /// window gesture (`None` turns gestures off).
     fn set_mouse_modifier(&mut self, _modifier: Option<Modifier>) {}
+    /// Whether a modifier key is held right now.
+    fn modifier_held(&mut self, _modifier: Modifier) -> bool {
+        false
+    }
     /// `bspx ...` command lines from keyboard shortcuts since the last call.
     fn hotkey_commands(&mut self) -> Vec<String> {
         Vec::new()

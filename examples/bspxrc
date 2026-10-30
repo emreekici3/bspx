@@ -33,6 +33,11 @@ bspx config mouse_modifier alt
 bspx config mouse_action1 move
 bspx config mouse_action2 resize
 
+# Also hold this key while moving a tiled window: dropped near an edge of
+# another window, it splits that window and takes the half on that side,
+# rather than swapping with it. alt, cmd, ctrl, shift, fn, or off.
+bspx config mouse_insert_modifier cmd
+
 # Move the pointer to the window focused with `bspx focus` or `bspx swap`.
 bspx config mouse_follows_focus off
 
@@ -51,6 +56,12 @@ bspx rule float "Archive Utility"
 # bspx label 2 web
 # bspx label 3 coding
 # bspx rule space web "Safari"
+# Apps whose new windows float at a place of their own: split the screen
+# into rows:cols cells and take w x h of them from column x, row y
+# (counted from 0), as in yabai's grid=.
+# bspx rule grid 4:4:3:0:1:1 "Calculator"   # top right corner
+# bspx rule grid 1:2:1:0:1:1 "Spotify"      # right half
+# bspx rule grid 6:6:1:1:4:4 "Finder"       # centred, two thirds
 # A Space whose windows are not tiled:
 # bspx layout coding float
 
