@@ -458,8 +458,8 @@ impl<B: Backend> Manager<B> {
         }
 
         // A window tiled before its minimum size was known may have turned
-        // out too big for its half: it floats, rather than taking room from
-        // the other windows.
+        // out too big for its half: the other windows make room for it, or
+        // it floats when they cannot.
         if let Some(last) = self.last_tiled.clone() {
             let id = last.id;
             let without = {
@@ -467,21 +467,41 @@ impl<B: Backend> Manager<B> {
                 t.remove(id);
                 t
             };
-            if self.clock - last.at > NO_ROOM_SECS || self.tree != last.tree {
+            let done = self.clock - last.at > NO_ROOM_SECS || self.tree != last.tree;
+            // Learn what every window that was resized for it really took,
+            // even a little more than it was given.
+            let over = !done
+                && self.tree.len() > 1
+                && self.targets() == last.layout
+                && self.split_overflows(&without, id, &expected);
+            if done {
                 self.last_tiled = None;
             } else if self.tree.len() > 1
-                && (!self.splits_in_place(&without, &self.tree, id)
-                    || self.targets() == last.layout
-                        && self.split_overflows(&without, id, &expected))
+                && (over || !self.splits_in_place(&without, &self.tree, id))
             {
-                self.last_tiled = None;
-                self.tree.remove(id);
-                self.anim.cancel(id);
-                if self.focused == Some(id) {
-                    self.focused = self.tree.windows().last().copied();
+                let mut tree = self.tree.clone();
+                if self.make_room(&mut tree) {
+                    if tree != self.tree {
+                        debug!("making room for window {id}");
+                        self.tree = tree;
+                        dirty = true;
+                    }
+                    // Still watched, in case it refuses more.
+                    self.last_tiled = Some(LastTiled {
+                        tree: self.tree.clone(),
+                        layout: self.targets(),
+                        ..last
+                    });
+                } else {
+                    self.last_tiled = None;
+                    self.tree.remove(id);
+                    self.anim.cancel(id);
+                    if self.focused == Some(id) {
+                        self.focused = self.tree.windows().last().copied();
+                    }
+                    self.float_in_the_middle(id);
+                    dirty = true;
                 }
-                self.float_in_the_middle(id);
-                dirty = true;
             }
         }
 
@@ -490,10 +510,10 @@ impl<B: Backend> Manager<B> {
         }
     }
 
-    /// Tiles `id` by splitting `target` (or the last window), if every
-    /// window still fits its minimum size then. Returns `false`, leaving the
-    /// layout alone, if not: a new window opens where the user is looking or
-    /// not at all, never in some other part of the screen.
+    /// Tiles `id` by splitting `target` (or the last window). When the two
+    /// halves are too small for them, the other windows give up some of
+    /// their room, down to their minimum sizes. Returns `false`, leaving the
+    /// layout alone, if even that leaves too little room: the screen is full.
     fn tile_where_it_fits(&mut self, id: WinId, target: Option<WinId>) -> bool {
         let (inner, gap, ratio) = (self.inner_area(), self.config.gap, self.config.split_ratio);
         if self.tree.is_empty() {
@@ -503,12 +523,28 @@ impl<B: Backend> Manager<B> {
         }
         let mut tree = self.tree.clone();
         tree.insert(id, target, inner, gap, ratio);
-        if !self.splits_in_place(&self.tree, &tree, id) {
+        if self.splits_in_place(&self.tree, &tree, id) {
+            debug!("tiling window {id} next to {target:?}");
+        } else if self.make_room(&mut tree) {
+            debug!("tiling window {id} next to {target:?}, making room for it");
+        } else {
             return false;
         }
-        debug!("tiling window {id} next to {target:?}");
         self.tree = tree;
         self.watch_tiled(id);
+        true
+    }
+
+    /// Resizes the splits of `tree` so every window gets at least its
+    /// minimum size, as far as it is known. Returns `false`, leaving `tree`
+    /// alone, when the windows do not fit on the screen however it is split.
+    fn make_room(&self, tree: &mut BspTree) -> bool {
+        let (inner, gap) = (self.inner_area(), self.config.gap);
+        let mins = self.likely_min_sizes(&tree.windows());
+        if !tree.fits(inner, gap, &mins) {
+            return false;
+        }
+        tree.settle_ratios(inner, gap, &mins);
         true
     }
 
@@ -1417,9 +1453,10 @@ impl<B: Backend> Manager<B> {
     /// window's larger area.
     fn targets(&self) -> Vec<(WinId, Rect)> {
         let area = self.inner_area();
-        let mut targets = self
-            .tree
-            .layout_with(area, self.config.gap, &self.min_sizes);
+        // The minimum sizes the room was made with, including what other
+        // windows of the same app refused.
+        let mins = self.likely_min_sizes(&self.tree.windows());
+        let mut targets = self.tree.layout_with(area, self.config.gap, &mins);
         if let Some(zoomed) = self.zoom_rect() {
             for t in &mut targets {
                 if t.0 == zoomed.0 {
@@ -2144,7 +2181,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn new_windows_stay_in_the_part_of_the_screen_they_split() {
+    fn new_windows_split_in_place_while_they_fit() {
         let mut m = manager(0.0);
         // One window on the left, two on the right: the bottom right one
         // has a quarter of the screen.
@@ -2154,24 +2191,43 @@ pub(crate) mod tests {
         let quarter = m.backend().frame(3);
         assert_eq!(quarter, Rect::new(505, 330, 495, 295));
         let (safari, notes) = (m.backend().frame(1), m.backend().frame(2));
-        // Terminals opened from there, as many as you like.
+        // A Terminal that fits in the quarter leaves the rest alone.
+        open_many(&mut m, 4, 1, "Terminal", (200, 100));
+        assert!(m.tree().contains(4));
+        assert_eq!(m.backend().frame(1), safari, "the left side is untouched");
+        assert_eq!(m.backend().frame(2), notes, "the top right is untouched");
+        let f = m.backend().frame(4);
+        assert!(
+            f.x >= quarter.x
+                && f.y >= quarter.y
+                && f.max_x() <= quarter.max_x()
+                && f.max_y() <= quarter.max_y(),
+            "window 4 left the quarter: {f:?}"
+        );
+        assert_tidy(&m);
+    }
+
+    #[test]
+    fn new_windows_make_room_until_the_screen_is_full() {
+        let mut m = manager(0.0);
+        open_many(&mut m, 1, 1, "Safari", (0, 0));
+        open_many(&mut m, 2, 1, "Notes", (0, 0));
+        open_many(&mut m, 3, 1, "Notes", (0, 0));
+        let (safari, notes) = (m.backend().frame(1), m.backend().frame(2));
         for id in 4..16 {
             open_many(&mut m, id, 1, "Terminal", (200, 100));
         }
-        assert_eq!(m.backend().frame(1), safari, "the left side is untouched");
-        assert_eq!(m.backend().frame(2), notes, "the top right is untouched");
         let tiled = m.tree().windows();
-        assert!(tiled.len() > 3, "the quarter is used: {tiled:?}");
-        for id in tiled.iter().filter(|w| **w > 2) {
+        assert!(
+            m.backend().frame(1) != safari || m.backend().frame(2) != notes,
+            "the other windows made room"
+        );
+        // Every tiled Terminal got at least its minimum size.
+        for id in tiled.iter().filter(|w| **w > 3) {
             let f = m.backend().frame(*id);
-            assert!(
-                f.x >= quarter.x
-                    && f.y >= quarter.y
-                    && f.max_x() <= quarter.max_x()
-                    && f.max_y() <= quarter.max_y(),
-                "window {id} left the quarter: {f:?}"
-            );
+            assert!(f.w >= 200 && f.h >= 100, "window {id}: {f:?}");
         }
+        assert!(tiled.len() < 15, "not all fit: {tiled:?}");
         // The rest float in the middle.
         for id in (4..16).filter(|w| !tiled.contains(w)) {
             let (cx, cy) = m.backend().frame(id).center();
@@ -2183,6 +2239,21 @@ pub(crate) mod tests {
         assert_tidy(&m);
     }
 
+    #[test]
+    fn a_big_window_next_to_two_halves_gets_room() {
+        // Two Terminals side by side, then WhatsApp, whose minimum size is
+        // larger than the half it splits.
+        let mut m = manager(0.0);
+        open_many(&mut m, 1, 2, "Terminal", (300, 180));
+        assert_eq!(m.tree().len(), 2);
+        open_many(&mut m, 3, 1, "WhatsApp", (600, 400));
+        assert!(m.tree().contains(3), "WhatsApp is tiled, not floating");
+        for (id, (w, h)) in [(1, (300, 180)), (2, (300, 180)), (3, (600, 400))] {
+            let f = m.backend().frame(id);
+            assert!(f.w >= w && f.h >= h, "window {id}: {f:?}");
+        }
+        assert_tidy(&m);
+    }
     #[test]
     fn a_window_rounding_its_size_up_a_little_stays_tiled() {
         let mut m = manager(0.0);
@@ -2202,35 +2273,22 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_window_a_little_too_big_for_its_half_floats_at_its_own_size() {
+    fn a_window_a_little_too_big_for_its_half_gets_room() {
         let mut m = manager(0.0);
         open_many(&mut m, 1, 1, "Safari", (0, 0));
         open_many(&mut m, 2, 1, "Notes", (0, 0));
         open_many(&mut m, 3, 1, "Notes", (0, 0));
         // 242x295, then 242x142 halves: 8 points short of what Terminal
-        // takes, too little to count as a minimum size.
+        // takes. The other windows make up the difference, gap included.
         open_many(&mut m, 4, 1, "Terminal", (200, 150));
-        let fourth = m.backend().frame(4);
         open_many(&mut m, 5, 1, "Terminal", (200, 150));
-        assert!(!m.tree().contains(5), "the gap is not eaten");
-        assert_eq!(m.backend().frame(4), fourth, "the other half is given back");
-        assert_eq!(
-            m.backend().frame(5),
-            Rect::new(350, 225, 300, 200),
-            "in the middle, at the size it opened with"
-        );
-        assert_tidy(&m);
-        // The next Terminal does not even try.
-        m.backend.focused = Some(4);
-        m.refresh();
-        let before = m.backend().overlay_changes;
-        open_many(&mut m, 6, 1, "Terminal", (200, 150));
-        assert!(!m.tree().contains(6));
-        assert_eq!(m.backend().frame(4), fourth);
-        assert_eq!(m.backend().overlay_changes, before);
+        assert!(m.tree().contains(5));
+        for id in [4, 5] {
+            let f = m.backend().frame(id);
+            assert!(f.w >= 200 && f.h >= 150, "window {id}: {f:?}");
+        }
         assert_tidy(&m);
     }
-
     #[test]
     fn a_full_screen_refuses_to_tile_by_hand() {
         let mut m = manager(0.0);
@@ -2243,10 +2301,10 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_new_window_only_splits_the_focused_one() {
+    fn a_full_screen_floats_the_next_window_and_leaves_the_layout_alone() {
         let mut m = manager(0.0);
         // A big Safari, then Terminals, each splitting the one before it,
-        // until one does not fit next to the focused Terminal.
+        // until the screen is full.
         open_many(&mut m, 1, 1, "Safari", (0, 0));
         let mut floating = None;
         for id in 2..20 {
@@ -2261,25 +2319,6 @@ pub(crate) mod tests {
         let floating = floating.expect("the Terminals ran out of room");
         let (cx, cy) = m.backend().frame(floating).center();
         assert!((cx - 500.0).abs() <= 1.0 && (cy - 325.0).abs() <= 1.0);
-        assert_tidy(&m);
-        // There was room next to a big window all along; it is used when
-        // that window is focused.
-        let wide = *m
-            .tree()
-            .windows()
-            .iter()
-            .find(|w| {
-                let f = m.backend().frame(**w);
-                f.w >= 2 * 300 + 10 || f.h >= 2 * 180 + 10
-            })
-            .expect("a window with room beside it");
-        m.backend.focused = Some(wide);
-        m.refresh();
-        m.backend.focused = Some(floating);
-        m.execute(&Command::ToggleFloat).unwrap();
-        m.refresh();
-        settle(&mut m);
-        assert!(m.tree().contains(floating));
         assert_tidy(&m);
     }
 

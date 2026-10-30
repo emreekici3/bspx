@@ -61,10 +61,14 @@ impl Node {
     }
 
     /// The smallest area this subtree fits in: its windows' minimum sizes
-    /// side by side or stacked, with the gaps between them.
+    /// side by side or stacked, with the gaps between them. Every window
+    /// takes at least a point, as [`split_area`](Self::split_area) gives it.
     fn min_size(&self, mins: &MinSizes, gap: i32) -> (i32, i32) {
         match self {
-            Node::Leaf(w) => mins.get(w).copied().unwrap_or((0, 0)),
+            Node::Leaf(w) => {
+                let (w, h) = mins.get(w).copied().unwrap_or((0, 0));
+                (w.max(1), h.max(1))
+            }
             Node::Split { split, a, b, .. } => {
                 let (aw, ah) = a.min_size(mins, gap);
                 let (bw, bh) = b.min_size(mins, gap);
