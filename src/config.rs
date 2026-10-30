@@ -151,6 +151,34 @@ pub const KEYS: &[&str] = &[
     "log_level",
 ];
 
+/// Whether a rule's app name matches a window's app name. Both are compared
+/// without invisible formatting characters and surrounding whitespace: some
+/// apps put such characters in their names (WhatsApp reports itself as
+/// "\u{200e}WhatsApp"), and the name typed in `bspxrc` cannot contain them.
+pub fn app_matches(rule: &str, app: &str) -> bool {
+    clean_app_name(rule) == clean_app_name(app)
+}
+
+/// An app name without invisible formatting characters (direction marks,
+/// zero-width spaces and joiners, byte order marks, soft hyphens) and
+/// without surrounding whitespace.
+pub fn clean_app_name(name: &str) -> String {
+    let visible: String = name.chars().filter(|&c| !is_invisible(c)).collect();
+    visible.trim().to_string()
+}
+
+fn is_invisible(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{FEFF}'
+    )
+}
+
 /// Parses `RRGGBB` or `RRGGBBAA`, with an optional `#` or `0x` prefix.
 fn parse_color(value: &str) -> Option<[f32; 4]> {
     let hex = value
@@ -394,13 +422,13 @@ impl Config {
 
     /// `bspx rule space <space> <app>`.
     pub fn set_space_rule(&mut self, app: &str, space: &str) {
-        self.space_rules.retain(|(a, _)| a != app);
+        self.space_rules.retain(|(a, _)| !app_matches(a, app));
         self.space_rules.push((app.to_string(), space.to_string()));
     }
 
     /// `bspx rule grid <rows:cols:x:y:w:h> <app>`.
     pub fn set_grid_rule(&mut self, app: &str, grid: [u32; 6]) {
-        self.grid_rules.retain(|(a, _)| a != app);
+        self.grid_rules.retain(|(a, _)| !app_matches(a, app));
         self.grid_rules.push((app.to_string(), grid));
     }
 
@@ -431,7 +459,7 @@ impl Config {
 
     /// `bspx rule float <app>` / `bspx rule tile <app>`.
     pub fn set_float_app(&mut self, app: &str, float: bool) {
-        self.float_apps.retain(|a| a != app);
+        self.float_apps.retain(|a| !app_matches(a, app));
         if float {
             self.float_apps.push(app.to_string());
         }
@@ -567,6 +595,19 @@ mod tests {
         c.set_space_rule("Safari", "web");
         c.set_space_rule("Safari", "2");
         assert_eq!(c.space_rules, vec![("Safari".into(), "2".into())]);
+    }
+
+    #[test]
+    fn rules_match_apps_with_invisible_characters_in_their_names() {
+        assert!(app_matches("WhatsApp", "\u{200e}WhatsApp"));
+        assert!(app_matches("\u{200e}WhatsApp", "WhatsApp"));
+        assert!(app_matches(" Safari ", "Safari\u{feff}"));
+        assert!(!app_matches("WhatsApp", "WhatsApp Beta"));
+        assert!(!app_matches("whatsapp", "WhatsApp"));
+        let mut c = Config::default();
+        c.set_float_app("WhatsApp", true);
+        c.set_float_app("\u{200e}WhatsApp", true);
+        assert_eq!(c.float_apps.len(), Config::default().float_apps.len() + 1);
     }
 
     #[test]

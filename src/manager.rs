@@ -7,7 +7,7 @@ use log::{debug, info, warn};
 use crate::anim::Animator;
 use crate::bsp::{self, BspTree, MinSizes, WinId};
 use crate::command::{Command, Zoom};
-use crate::config::{Config, MouseAction};
+use crate::config::{Config, MouseAction, app_matches};
 use crate::geometry::{Direction, Rect};
 use crate::platform::{Backend, Modifier, MouseButton, Overlay, WindowEvent, WindowInfo};
 
@@ -254,7 +254,7 @@ impl<B: Backend> Manager<B> {
         self.config = config;
         let floats = |apps: &HashMap<WinId, String>, config: &Config, id: &WinId| {
             let app = apps.get(id).map_or("", String::as_str);
-            config.float_apps.iter().any(|a| a == app)
+            config.float_apps.iter().any(|a| app_matches(a, app))
         };
         for id in self.tree.windows() {
             if floats(&self.apps, &self.config, &id) {
@@ -435,7 +435,11 @@ impl<B: Backend> Manager<B> {
                 && spaces.get(&info.id) == Some(&space)
                 && !self.floating.contains(&info.id)
                 && !self.closed.contains(&info.id)
-                && !self.config.float_apps.iter().any(|a| a == &info.app);
+                && !self
+                    .config
+                    .float_apps
+                    .iter()
+                    .any(|a| app_matches(a, &info.app));
             if wanted && !self.is_tiled_anywhere(info.id) {
                 new.push(info.id);
             }
@@ -669,7 +673,7 @@ impl<B: Backend> Manager<B> {
             .config
             .grid_rules
             .iter()
-            .find(|(a, _)| a == app)
+            .find(|(a, _)| app_matches(a, app))
             .map(|(_, g)| *g)
         else {
             return false;
@@ -696,7 +700,7 @@ impl<B: Backend> Manager<B> {
             .config
             .space_rules
             .iter()
-            .find(|(a, _)| a == app)
+            .find(|(a, _)| app_matches(a, app))
             .map(|(_, s)| s.clone())
         else {
             return false;
@@ -1650,18 +1654,18 @@ impl<B: Backend> Manager<B> {
             }
             Command::RaiseFloating => {
                 let focused_now = self.backend.focused_window();
-                let mut floats: Vec<WinId> =
-                    self.frames
-                        .keys()
-                        .copied()
-                        .filter(|id| !self.is_tiled_anywhere(*id))
-                        .filter(|id| {
-                            self.floating.contains(id)
-                                || self.apps.get(id).is_some_and(|app| {
-                                    self.config.float_apps.iter().any(|a| a == app)
-                                })
-                        })
-                        .collect();
+                let mut floats: Vec<WinId> = self
+                    .frames
+                    .keys()
+                    .copied()
+                    .filter(|id| !self.is_tiled_anywhere(*id))
+                    .filter(|id| {
+                        self.floating.contains(id)
+                            || self.apps.get(id).is_some_and(|app| {
+                                self.config.float_apps.iter().any(|a| app_matches(a, app))
+                            })
+                    })
+                    .collect();
                 if floats.is_empty() {
                     return Err("no floating windows on this Space".into());
                 }
@@ -2274,6 +2278,18 @@ pub(crate) mod tests {
         m.refresh();
         assert!(m.tree().is_empty());
         assert_eq!(m.backend().frame(1), Rect::new(100, 100, 300, 200));
+    }
+
+    #[test]
+    fn float_rules_match_app_names_with_invisible_characters() {
+        // WhatsApp reports its name with a left-to-right mark in front.
+        let mut m = manager(0.0);
+        let mut config = Config::default();
+        config.set_float_app("WhatsApp", true);
+        m.set_config(config);
+        m.backend.open(1, "\u{200e}WhatsApp");
+        m.refresh();
+        assert!(m.tree().is_empty());
     }
 
     #[test]
