@@ -8,6 +8,10 @@
   An animated BSP tiling window manager for macOS, written in Rust.
 </p>
 
+<p align="center">
+  <img src="assets/demo/swap-with-mouse.gif" width="800" alt="bspx demo">
+</p>
+
 ## Features
 
 - BSP tiling with smooth animations
@@ -25,6 +29,67 @@
 - Rules that open an app's windows floating at a place and size of your choosing, on a grid
 - Shell-script config
 - No need to disable SIP
+
+## Demo
+
+<details open>
+<summary><b>Keyboard</b></summary>
+<br>
+
+<table>
+<tr>
+<td width="50%" valign="top"><b>Focus</b> — <code>bspx focus</code><br><img src="assets/demo/focus.gif" width="100%" alt="Focus"></td>
+<td width="50%" valign="top"><b>Swap</b> — <code>bspx swap</code><br><img src="assets/demo/swap.gif" width="100%" alt="Swap"></td>
+</tr>
+<tr>
+<td width="50%" valign="top"><b>Warp</b> — <code>bspx warp</code><br><img src="assets/demo/warp.gif" width="100%" alt="Warp"></td>
+<td width="50%" valign="top"><b>Resize</b> — <code>bspx resize</code><br><img src="assets/demo/resize.gif" width="100%" alt="Resize"></td>
+</tr>
+<tr>
+<td width="50%" valign="top"><b>Rotate</b> — <code>bspx rotate</code><br><img src="assets/demo/rotate.gif" width="100%" alt="Rotate"></td>
+<td width="50%" valign="top"><b>Toggle split</b> — <code>bspx toggle-split</code><br><img src="assets/demo/toggle-split.gif" width="100%" alt="Toggle split"></td>
+</tr>
+<tr>
+<td width="50%" valign="top"><b>Balance</b> — <code>bspx balance</code><br><img src="assets/demo/balance.gif" width="100%" alt="Balance"></td>
+<td width="50%" valign="top"><b>Float</b> — <code>bspx float</code><br><img src="assets/demo/float.gif" width="100%" alt="Float"></td>
+</tr>
+<tr>
+<td width="50%" valign="top"><b>Zoom</b> — <code>bspx zoom</code><br><img src="assets/demo/zoom.gif" width="100%" alt="Zoom"></td>
+<td width="50%" valign="top"><b>Zoom parent</b> — <code>bspx zoom parent</code><br><img src="assets/demo/zoom-parent.gif" width="100%" alt="Zoom parent"></td>
+</tr>
+</table>
+
+</details>
+
+<details>
+<summary><b>Mouse</b></summary>
+<br>
+
+<table>
+<tr>
+<td width="50%" valign="top"><b>Swap with the mouse</b><br><img src="assets/demo/swap-with-mouse.gif" width="100%" alt="Swap with the mouse"></td>
+<td width="50%" valign="top"><b>Split by dropping</b><br><img src="assets/demo/warp-with-mouse.gif" width="100%" alt="Split by dropping"></td>
+</tr>
+<tr>
+<td width="50%" valign="top"><b>Move a window</b><br><img src="assets/demo/move-window.gif" width="100%" alt="Move a window"></td>
+<td width="50%" valign="top"><b>Resize a window</b><br><img src="assets/demo/resize-window.gif" width="100%" alt="Resize a window"></td>
+</tr>
+</table>
+
+</details>
+
+<details>
+<summary><b>Spaces</b></summary>
+<br>
+
+<table>
+<tr>
+<td width="50%" valign="top"><b>Switch Spaces</b> — <code>bspx space</code><br><img src="assets/demo/go-space.gif" width="100%" alt="Switch Spaces"></td>
+<td width="50%" valign="top"><b>Take a window along</b> — <code>bspx send</code><br><img src="assets/demo/carry-space.gif" width="100%" alt="Take a window along"></td>
+</tr>
+</table>
+
+</details>
 
 ## Requirements
 
