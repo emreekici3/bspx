@@ -8,10 +8,6 @@
   An animated BSP tiling window manager for macOS, written in Rust.
 </p>
 
-<p align="center">
-  <img src="assets/demo/swap.gif" width="800" alt="bspx demo">
-</p>
-
 ## Features
 
 - BSP tiling with smooth animations
@@ -29,6 +25,29 @@
 - Rules that open an app's windows floating at a place and size of your choosing, on a grid
 - Shell-script config
 - No need to disable SIP
+
+<details>
+<summary><b>Demo</b></summary>
+<br>
+
+<details><summary>Focus — <code>bspx focus</code></summary><br><img src="assets/demo/focus.gif" width="800" alt="Focus"></details>
+<details><summary>Swap — <code>bspx swap</code></summary><br><img src="assets/demo/swap.gif" width="800" alt="Swap"></details>
+<details><summary>Warp — <code>bspx warp</code></summary><br><img src="assets/demo/warp.gif" width="800" alt="Warp"></details>
+<details><summary>Resize — <code>bspx resize</code></summary><br><img src="assets/demo/resize.gif" width="800" alt="Resize"></details>
+<details><summary>Rotate — <code>bspx rotate</code></summary><br><img src="assets/demo/rotate.gif" width="800" alt="Rotate"></details>
+<details><summary>Toggle split — <code>bspx toggle-split</code></summary><br><img src="assets/demo/toggle-split.gif" width="800" alt="Toggle split"></details>
+<details><summary>Balance — <code>bspx balance</code></summary><br><img src="assets/demo/balance.gif" width="800" alt="Balance"></details>
+<details><summary>Zoom — <code>bspx zoom</code></summary><br><img src="assets/demo/zoom.gif" width="800" alt="Zoom"></details>
+<details><summary>Zoom parent — <code>bspx zoom parent</code></summary><br><img src="assets/demo/zoom-parent.gif" width="800" alt="Zoom parent"></details>
+<details><summary>Float — <code>bspx float</code></summary><br><img src="assets/demo/float.gif" width="800" alt="Float"></details>
+<details><summary>Swap with the mouse</summary><br><img src="assets/demo/swap-with-mouse.gif" width="800" alt="Swap with the mouse"></details>
+<details><summary>Split by dropping</summary><br><img src="assets/demo/warp-with-mouse.gif" width="800" alt="Split by dropping"></details>
+<details><summary>Move with <code>alt</code>-drag</summary><br><img src="assets/demo/move-window.gif" width="800" alt="Move with <code>alt</code>-drag"></details>
+<details><summary>Resize with <code>alt</code>-right-drag</summary><br><img src="assets/demo/resize-window.gif" width="800" alt="Resize with <code>alt</code>-right-drag"></details>
+<details><summary>Switch Spaces — <code>bspx space</code></summary><br><img src="assets/demo/go-space.gif" width="800" alt="Switch Spaces"></details>
+<details><summary>Take a window to a Space — <code>bspx send</code></summary><br><img src="assets/demo/carry-space.gif" width="800" alt="Take a window to a Space"></details>
+
+</details>
 
 ## Requirements
 
@@ -74,20 +93,18 @@ If windows stop moving after an update, macOS has dropped the permission for the
 
 ## Commands
 
-Click a command to see it in action.
-
 | Command | What it does |
 |---|---|
-| [`bspx focus <dir>`](assets/demo/focus.gif) | Focus the neighbouring window |
-| [`bspx swap <dir>`](assets/demo/swap.gif) | Swap with the neighbouring window |
-| [`bspx warp <dir>`](assets/demo/warp.gif) | Move into the neighbouring window's place: it splits as for a new window, and the window keeps the side it came from |
-| [`bspx resize <dir> [amount]`](assets/demo/resize.gif) | Move the window's border |
-| [`bspx rotate`](assets/demo/rotate.gif) | Rotate the layout 90° |
+| `bspx focus <dir>` | Focus the neighbouring window |
+| `bspx swap <dir>` | Swap with the neighbouring window |
+| `bspx warp <dir>` | Move into the neighbouring window's place: it splits as for a new window, and the window keeps the side it came from |
+| `bspx resize <dir> [amount]` | Move the window's border |
+| `bspx rotate` | Rotate the layout 90° |
 | `bspx flip` | Swap the two halves of a split |
-| [`bspx toggle-split`](assets/demo/toggle-split.gif) | Switch a split between side by side and stacked |
-| [`bspx balance [area]`](assets/demo/balance.gif) | Undo every resize, as the windows were when they opened; `area` gives every window the same area instead |
-| `bspx zoom [fullscreen\|parent]` ([full screen](assets/demo/zoom.gif), [parent](assets/demo/zoom-parent.gif)) | Grow the focused window over the others to the full screen (default) or its split's area; run again to put it back |
-| [`bspx float`](assets/demo/float.gif) | Float or tile the focused window |
+| `bspx toggle-split` | Switch a split between side by side and stacked |
+| `bspx balance [area]` | Undo every resize, as the windows were when they opened; `area` gives every window the same area instead |
+| `bspx zoom [fullscreen\|parent]` | Grow the focused window over the others to the full screen (default) or its split's area; run again to put it back |
+| `bspx float` | Float or tile the focused window |
 | `bspx raise-floating` | Bring floating windows to the front |
 | `bspx query` | List windows with their app names |
 | `bspx config <key> [value]` | Show or change a setting |
@@ -96,9 +113,9 @@ Click a command to see it in action.
 | `bspx rule grid <rows:cols:x:y:w:h> "<app>"` | Open an app's new windows floating at a grid cell, e.g. `4:4:3:0:1:1` is the top-right quarter of the top-right quarter |
 | `bspx label [<n> <name>]` | Name Space `n`; alone, list the Spaces |
 | `bspx bind ['<hotkey>']` | Add a keyboard shortcut; alone, list them |
-| [`bspx space <space>`](assets/demo/go-space.gif) | Switch to a Space |
+| `bspx space <space>` | Switch to a Space |
 | `bspx layout <space> bsp\|float` | Tile a Space, or leave its windows where you put them |
-| [`bspx send <space>`](assets/demo/carry-space.gif) | Move the focused window to a Space |
+| `bspx send <space>` | Move the focused window to a Space |
 | `bspx reload` | Reload the config |
 | `bspx install` | Install the login service |
 | `bspx start` / `stop` / `restart` | Control the service |
@@ -149,10 +166,10 @@ A command that is just `bspx ...` runs inside bspx, without starting a process; 
 
 ## Mouse
 
-- Drag a window by its title bar onto another to swap them. ([demo](assets/demo/swap-with-mouse.gif))
+- Drag a window by its title bar onto another to swap them.
 - Drag the edge of a tiled window to move the split border.
-- Hold `alt` and drag anywhere on a window to move it; drop it on another window to swap them. ([demo](assets/demo/move-window.gif))
-- Hold `alt` and right-drag to resize a window from its nearest corner; the windows next to it follow. ([demo](assets/demo/resize-window.gif))
+- Hold `alt` and drag anywhere on a window to move it; drop it on another window to swap them.
+- Hold `alt` and right-drag to resize a window from its nearest corner; the windows next to it follow.
 
 To split a window instead of swapping with it, pick a second key:
 
@@ -160,7 +177,7 @@ To split a window instead of swapping with it, pick a second key:
 bspx config mouse_insert_modifier cmd
 ```
 
-Hold it along with `alt` and drop a window near an edge of another: that window is split in two and the dropped one takes the half on that side (the highlight shows which). ([demo](assets/demo/warp-with-mouse.gif))
+Hold it along with `alt` and drop a window near an edge of another: that window is split in two and the dropped one takes the half on that side (the highlight shows which).
 
 While `alt` is held, clicks do not reach apps. If an app needs `alt`-clicks, pick another key with `mouse_modifier`.
 
