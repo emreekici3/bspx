@@ -16,9 +16,11 @@
 - Keeps clear of the Dock, uses the full screen when it hides
 - Drag a window onto another to swap them, resize with the mouse
 - Hold `alt` to move or resize a window from anywhere on it
+- Hold a second key while dropping to split the window under it instead of swapping
 - Optional focus follows mouse and mouse follows focus
 - Built-in keyboard shortcuts
 - Named Spaces, switching Spaces, rules that send apps to them, and floating Spaces
+- Rules that open an app's windows floating at a place and size of your choosing, on a grid
 - Shell-script config
 - No need to disable SIP
 
@@ -215,6 +217,7 @@ bspx reload
 | `drag_swap` | Swap windows by drag and drop, `on` / `off` | `on` |
 | `drag_color` | Drop highlight colour, `RRGGBB` or `RRGGBBAA` | `5e9eff40` |
 | `mouse_modifier` | Key to hold for mouse moves and resizes: `alt`, `cmd`, `ctrl`, `shift`, `fn` or `off` | `alt` |
+| `mouse_insert_modifier` | Also held while moving a window, dropping it splits the window under it instead of swapping: `alt`, `cmd`, `ctrl`, `shift`, `fn` or `off` | `off` |
 | `mouse_action1` | Left-drag with the modifier: `move` or `resize` | `move` |
 | `mouse_action2` | Right-drag with the modifier: `move` or `resize` | `resize` |
 | `mouse_follows_focus` | Move the pointer to windows focused from the keyboard, `on` / `off` | `off` |
