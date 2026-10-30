@@ -14,6 +14,8 @@
 - A separate layout for every Space
 - Zoom a window to full screen or its split's area, and back
 - Keeps clear of the Dock, uses the full screen when it hides
+- Swap a window with its neighbour, or warp it into its neighbour's place
+- New windows never squeeze the others: with no room left, they open floating in the middle
 - Drag a window onto another to swap them, resize with the mouse
 - Hold `alt` to move or resize a window from anywhere on it
 - Hold a second key while dropping to split the window under it instead of swapping
