@@ -91,7 +91,8 @@ impl Node {
         let avail = (len - gap).max(2);
         let mut share = ((avail as f32) * ratio).round() as i32;
         if amin + bmin <= avail {
-            share = share.clamp(amin.max(1), (avail - bmin).min(avail - 1));
+            let hi = (avail - bmin).min(avail - 1);
+            share = share.clamp(amin.max(1).min(hi), hi);
         } else if amin + bmin > 0 {
             // Both cannot fit: share the shortfall in proportion.
             share = ((avail as f32) * amin as f32 / (amin + bmin) as f32).round() as i32;
@@ -213,6 +214,16 @@ impl BspTree {
             rec(root, area, gap, mins, &mut out);
         }
         out
+    }
+
+    /// Whether every window fits in `area` at no less than its entry in
+    /// `mins`. If so, [`layout_with`](Self::layout_with) gives each one at
+    /// least that.
+    pub fn fits(&self, area: Rect, gap: i32, mins: &MinSizes) -> bool {
+        self.root.as_ref().is_none_or(|root| {
+            let (w, h) = root.min_size(mins, gap);
+            w <= area.w && h <= area.h
+        })
     }
 
     /// Sets every split's ratio to the share it really gets with `mins`,
@@ -640,6 +651,33 @@ pub fn neighbor(layout: &[(WinId, Rect)], from: WinId, dir: Direction) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_minimum_size_that_takes_all_the_room_does_not_panic() {
+        let area = Rect::new(0, 0, 310, 100);
+        let mut t = BspTree::new();
+        t.insert(1, None, area, 10, 0.5);
+        t.insert(2, Some(1), area, 10, 0.5);
+        let mins: MinSizes = [(1, (300, 0))].into();
+        let layout = t.layout_with(area, 10, &mins);
+        assert_eq!(layout[0].1.w, 299);
+        assert_eq!(layout[1].1.w, 1);
+    }
+
+    #[test]
+    fn fits_counts_minimum_sizes_and_gaps() {
+        let area = Rect::new(0, 0, 1000, 600);
+        let mut t = BspTree::new();
+        assert!(t.fits(area, 10, &MinSizes::new()));
+        t.insert(1, None, area, 10, 0.5);
+        t.insert(2, Some(1), area, 10, 0.5);
+        let mins: MinSizes = [(1, (495, 600)), (2, (495, 600))].into();
+        assert!(t.fits(area, 10, &mins));
+        let mins: MinSizes = [(1, (496, 100)), (2, (495, 100))].into();
+        assert!(!t.fits(area, 10, &mins));
+        let mins: MinSizes = [(1, (100, 601))].into();
+        assert!(!t.fits(area, 10, &mins));
+    }
 
     const AREA: Rect = Rect::new(0, 0, 1000, 600);
     const GAP: i32 = 10;
