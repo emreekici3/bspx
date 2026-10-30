@@ -72,11 +72,12 @@ If windows stop moving after an update, macOS has dropped the permission for the
 |---|---|
 | `bspx focus <dir>` | Focus the neighbouring window |
 | `bspx swap <dir>` | Swap with the neighbouring window |
+| `bspx warp <dir>` | Move into the neighbouring window's place: it splits as for a new window, and the window keeps the side it came from |
 | `bspx resize <dir> [amount]` | Move the window's border |
 | `bspx rotate` | Rotate the layout 90° |
 | `bspx flip` | Swap the two halves of a split |
 | `bspx toggle-split` | Switch a split between side by side and stacked |
-| `bspx balance` | Give every window the same space |
+| `bspx balance [area]` | Undo every resize, as the windows were when they opened; `area` gives every window the same area instead |
 | `bspx zoom [fullscreen\|parent]` | Grow the focused window over the others to the full screen (default) or its split's area; run again to put it back |
 | `bspx float` | Float or tile the focused window |
 | `bspx raise-floating` | Bring floating windows to the front |
@@ -112,6 +113,11 @@ bspx bind 'shift + alt - h : bspx swap left'
 bspx bind 'shift + alt - j : bspx swap down'
 bspx bind 'shift + alt - k : bspx swap up'
 bspx bind 'shift + alt - l : bspx swap right'
+
+bspx bind 'meh - h : bspx warp left'
+bspx bind 'meh - j : bspx warp down'
+bspx bind 'meh - k : bspx warp up'
+bspx bind 'meh - l : bspx warp right'
 
 bspx bind 'ctrl + alt - h : bspx resize left'
 bspx bind 'ctrl + alt - j : bspx resize down'

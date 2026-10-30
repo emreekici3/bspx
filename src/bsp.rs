@@ -549,6 +549,21 @@ impl BspTree {
         }
     }
 
+    /// Sets every split back to `ratio`: the layout the windows had when
+    /// they opened, before any resize.
+    pub fn equalize(&mut self, ratio: f32) {
+        fn rec(node: &mut Node, ratio: f32) {
+            if let Node::Split { ratio: r, a, b, .. } = node {
+                *r = ratio;
+                rec(a, ratio);
+                rec(b, ratio);
+            }
+        }
+        if let Some(root) = &mut self.root {
+            rec(root, ratio.clamp(MIN_RATIO, MAX_RATIO));
+        }
+    }
+
     /// Gives every window the same share of the screen.
     pub fn balance(&mut self) {
         fn rec(node: &mut Node) {
@@ -844,6 +859,17 @@ mod tests {
         t.rotate();
         t.rotate();
         assert_eq!(t.layout(AREA, GAP), tree(&[1, 2]).layout(AREA, GAP));
+    }
+
+    #[test]
+    fn equalize_puts_every_border_back_in_the_middle() {
+        let fresh = tree(&[1, 2, 3]);
+        let mut t = fresh.clone();
+        t.resize(3, Direction::Left, 0.2);
+        t.resize(3, Direction::Up, 0.2);
+        assert_ne!(t.layout(AREA, GAP), fresh.layout(AREA, GAP));
+        t.equalize(0.5);
+        assert_eq!(t.layout(AREA, GAP), fresh.layout(AREA, GAP));
     }
 
     #[test]

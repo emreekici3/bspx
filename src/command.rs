@@ -17,6 +17,10 @@ pub enum Command {
     Focus(Direction),
     /// Swap the focused window with its neighbour.
     Swap(Direction),
+    /// Move the focused window into its neighbour's place: the neighbour
+    /// splits as it would for a new window, and the window keeps the side
+    /// it came from.
+    Warp(Direction),
     /// Move a border of the focused window; amount defaults to `resize_step`.
     Resize(Direction, Option<f32>),
     /// Rotate the whole layout 90° clockwise.
@@ -25,8 +29,11 @@ pub enum Command {
     Flip,
     /// Switch the focused window's split between side by side and stacked.
     ToggleSplit,
-    /// Give all windows equal space.
+    /// Undo every resize: each split back to `split_ratio`, as the windows
+    /// were laid out when they opened.
     Balance,
+    /// Give every window the same area.
+    BalanceArea,
     /// Let the focused window cover the whole screen (or the area of its
     /// split, for [`Zoom::Parent`]) over the others, or put it back.
     Zoom(Zoom),
@@ -69,8 +76,10 @@ pub const USAGE: &str = "\
 commands:
   focus  <left|right|up|down>
   swap   <left|right|up|down>
+  warp   <left|right|up|down>             move into the neighbour's place, splitting it
   resize <left|right|up|down> [amount]   e.g. resize right 0.1
-  rotate | flip | toggle-split | balance
+  rotate | flip | toggle-split
+  balance [area]                           undo resizes; area: give all windows the same area
   zoom [fullscreen|parent]                 toggle zoom for the focused window
   float                                    toggle tiling for the focused window
   raise-floating                           bring floating windows to the front
@@ -111,6 +120,7 @@ impl Command {
             None => return Err("empty command".into()),
             Some("focus") => Command::Focus(dir(1)?),
             Some("swap") => Command::Swap(dir(1)?),
+            Some("warp") => Command::Warp(dir(1)?),
             Some("resize") => {
                 let amount = match words.get(2) {
                     None => None,
@@ -127,7 +137,11 @@ impl Command {
             Some("rotate") => no_args(Command::Rotate)?,
             Some("flip") => no_args(Command::Flip)?,
             Some("toggle-split") => no_args(Command::ToggleSplit)?,
-            Some("balance") => no_args(Command::Balance)?,
+            Some("balance") => match words.get(1).copied() {
+                None => Command::Balance,
+                Some("area") => Command::BalanceArea,
+                Some(other) => return Err(format!("balance: unknown option '{other}'")),
+            },
             Some("zoom") => Command::Zoom(match words.get(1).copied() {
                 None | Some("fullscreen") => Zoom::Fullscreen,
                 Some("parent") => Zoom::Parent,
@@ -237,6 +251,8 @@ impl Command {
         let max_words = match cmd {
             Command::Focus(_)
             | Command::Swap(_)
+            | Command::Warp(_)
+            | Command::BalanceArea
             | Command::Zoom(_)
             | Command::Send(_)
             | Command::Space(_) => 2,
@@ -293,6 +309,25 @@ mod tests {
             })
         );
         assert!(Command::parse("rule space web").is_err());
+    }
+
+    #[test]
+    fn parses_balance() {
+        assert_eq!(Command::parse("balance"), Ok(Command::Balance));
+        assert_eq!(Command::parse("balance area"), Ok(Command::BalanceArea));
+        assert!(Command::parse("balance width").is_err());
+        assert!(Command::parse("balance area now").is_err());
+    }
+
+    #[test]
+    fn parses_warp() {
+        assert_eq!(
+            Command::parse("warp left"),
+            Ok(Command::Warp(Direction::Left))
+        );
+        assert_eq!(Command::parse("warp j"), Ok(Command::Warp(Direction::Down)));
+        assert!(Command::parse("warp").is_err());
+        assert!(Command::parse("warp left now").is_err());
     }
 
     #[test]

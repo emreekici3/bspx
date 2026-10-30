@@ -48,9 +48,9 @@ pub struct Manager<B: Backend> {
     /// The minimum size last learned for each app's windows, a guess for a
     /// new window of the app before it has refused a size itself.
     app_mins: HashMap<String, (i32, i32)>,
-    /// The window tiled last, when, and the layout it was tiled into: if it
-    /// turns out not to fit after all, it is the one that floats.
-    last_tiled: Option<(WinId, f64, Layout)>,
+    /// The window tiled last, watched for a moment: if it turns out not to
+    /// fit after all, it is the one that floats.
+    last_tiled: Option<LastTiled>,
     /// Each window's frame when bspx first saw it: the size it floats at
     /// when there is no room to tile it.
     opened: HashMap<WinId, Rect>,
@@ -149,8 +149,17 @@ const DRAG_THRESHOLD: i32 = 4;
 /// text cells is not mistaken for one.
 const MIN_SIZE_THRESHOLD: i32 = 24;
 
-/// Where every tiled window goes, as [`Manager::targets`] lists it.
-type Layout = Vec<(WinId, Rect)>;
+/// A window just tiled, and what it was tiled into.
+#[derive(Clone)]
+struct LastTiled {
+    id: WinId,
+    at: f64,
+    /// The tree right after it went in. Once the user changes it (a swap,
+    /// a warp, a resize...), the window is no longer judged.
+    tree: BspTree,
+    /// Where every window went then.
+    layout: Vec<(WinId, Rect)>,
+}
 
 /// How long after it was tiled a window that turns out not to fit (its
 /// minimum size was not known yet) is taken out of the layout again.
@@ -447,17 +456,19 @@ impl<B: Backend> Manager<B> {
         // A window tiled before its minimum size was known may have turned
         // out too big for its half: it floats, rather than taking room from
         // the other windows.
-        if let Some((id, at, laid_out)) = self.last_tiled.clone() {
+        if let Some(last) = self.last_tiled.clone() {
+            let id = last.id;
             let without = {
                 let mut t = self.tree.clone();
                 t.remove(id);
                 t
             };
-            if self.clock - at > NO_ROOM_SECS || !self.tree.contains(id) {
+            if self.clock - last.at > NO_ROOM_SECS || self.tree != last.tree {
                 self.last_tiled = None;
             } else if self.tree.len() > 1
                 && (!self.splits_in_place(&without, &self.tree, id)
-                    || self.targets() == laid_out && self.split_overflows(&without, id, &expected))
+                    || self.targets() == last.layout
+                        && self.split_overflows(&without, id, &expected))
             {
                 self.last_tiled = None;
                 self.tree.remove(id);
@@ -483,7 +494,7 @@ impl<B: Backend> Manager<B> {
         let (inner, gap, ratio) = (self.inner_area(), self.config.gap, self.config.split_ratio);
         if self.tree.is_empty() {
             self.tree.insert(id, None, inner, gap, ratio);
-            self.last_tiled = Some((id, self.clock, self.targets()));
+            self.watch_tiled(id);
             return true;
         }
         let mut tree = self.tree.clone();
@@ -493,8 +504,18 @@ impl<B: Backend> Manager<B> {
         }
         debug!("tiling window {id} next to {target:?}");
         self.tree = tree;
-        self.last_tiled = Some((id, self.clock, self.targets()));
+        self.watch_tiled(id);
         true
+    }
+
+    /// Watches `id`, just tiled, for a moment: see [`LastTiled`].
+    fn watch_tiled(&mut self, id: WinId) {
+        self.last_tiled = Some(LastTiled {
+            id,
+            at: self.clock,
+            tree: self.tree.clone(),
+            layout: self.targets(),
+        });
     }
 
     /// Whether adding `id` turned `without` into `with` by splitting one
@@ -1499,6 +1520,61 @@ impl<B: Backend> Manager<B> {
                 self.tree.swap(from, to);
                 self.warp_to(from);
             }
+            Command::Warp(dir) => {
+                let from = focused()?;
+                let to =
+                    bsp::neighbor(&self.slots(), from, dir).ok_or("no window in that direction")?;
+                let (inner, gap, ratio) =
+                    (self.inner_area(), self.config.gap, self.config.split_ratio);
+                let before: HashMap<WinId, Rect> = self.slots().into_iter().collect();
+                let mut tree = self.tree.clone();
+                tree.remove(from);
+                // The neighbour splits the way it would for a new window
+                // (a tall one into top and bottom), and the window keeps
+                // the side it came from across that split: from the bottom
+                // left, it goes to the bottom.
+                tree.insert(from, Some(to), inner, gap, ratio);
+                let after: HashMap<WinId, Rect> = tree.layout(inner, gap).into_iter().collect();
+                let (fa, ta) = (after[&from], after[&to]);
+                let (fc, tc) = (before[&from].center(), before[&to].center());
+                let side_by_side = fa.y == ta.y;
+                let wants_first = if side_by_side {
+                    fc.0 < tc.0
+                } else {
+                    fc.1 < tc.1
+                };
+                let is_first = if side_by_side {
+                    fa.x < ta.x
+                } else {
+                    fa.y < ta.y
+                };
+                if wants_first != is_first {
+                    tree.swap(from, to);
+                }
+                // Already where it would go: the two trade places instead.
+                if tree.layout(inner, gap) == self.tree.layout(inner, gap) {
+                    tree.swap(from, to);
+                }
+                // Every window must fit its plain share: the layout may not
+                // take room from other windows to make it work.
+                let mins = self.likely_min_sizes(&tree.windows());
+                let room = tree
+                    .layout(self.inner_area(), self.config.gap)
+                    .into_iter()
+                    .all(|(w, r)| {
+                        let (min_w, min_h) = mins.get(&w).copied().unwrap_or((0, 0));
+                        r.w >= min_w && r.h >= min_h
+                    });
+                if !room {
+                    return Err("no room for this window there".into());
+                }
+                if self.zoomed.is_some_and(|(w, _)| w == from || w == to) {
+                    self.zoomed = None;
+                }
+                info!("window {from} warped {dir:?} into window {to}'s place");
+                self.tree = tree;
+                self.warp_to(from);
+            }
             Command::Resize(dir, amount) => {
                 let win = focused()?;
                 let amount = amount.unwrap_or(self.config.resize_step);
@@ -1527,7 +1603,8 @@ impl<B: Backend> Manager<B> {
                     return Err("the window is not split".into());
                 }
             }
-            Command::Balance => self.tree.balance(),
+            Command::Balance => self.tree.equalize(self.config.split_ratio),
+            Command::BalanceArea => self.tree.balance(),
             Command::Zoom(zoom) => {
                 let win = focused()?;
                 if self.zoomed == Some((win, zoom)) {
@@ -2801,6 +2878,109 @@ pub(crate) mod tests {
         m.backend.gesture = None;
         m.backend.mouse = false;
         m.track_pointer();
+    }
+
+    #[test]
+    fn warp_moves_a_window_into_its_neighbours_place() {
+        let mut m = left_one_right_two();
+        // The bottom right window goes left: the tall left window splits
+        // into top and bottom, and the window takes the bottom, where it
+        // came from. The top right one takes the whole right side.
+        m.backend.focused = Some(3);
+        m.execute(&Command::Warp(Direction::Left)).unwrap();
+        assert_eq!(m.backend().frame(1), Rect::new(0, 25, 495, 295));
+        assert_eq!(m.backend().frame(3), Rect::new(0, 330, 495, 295));
+        assert_eq!(m.backend().frame(2), Rect::new(505, 25, 495, 600));
+        // Nothing further left.
+        assert!(m.execute(&Command::Warp(Direction::Left)).is_err());
+        // And back.
+        m.execute(&Command::Warp(Direction::Right)).unwrap();
+        assert_eq!(m.backend().frame(1), Rect::new(0, 25, 495, 600));
+        assert_eq!(m.backend().frame(2), Rect::new(505, 25, 495, 295));
+        assert_eq!(m.backend().frame(3), Rect::new(505, 330, 495, 295));
+    }
+
+    #[test]
+    fn warp_the_bottom_left_window_right() {
+        // Two on the left, one on the right.
+        let mut m = manager(0.0);
+        open_many(&mut m, 1, 1, "Safari", (0, 0));
+        open_many(&mut m, 2, 1, "Notes", (0, 0));
+        m.backend.focused = Some(1);
+        m.refresh();
+        open_many(&mut m, 3, 1, "Terminal", (0, 0));
+        assert_eq!(m.backend().frame(3), Rect::new(0, 330, 495, 295));
+        m.backend.focused = Some(3);
+        m.execute(&Command::Warp(Direction::Right)).unwrap();
+        // The right window splits top and bottom; nothing side by side.
+        assert_eq!(m.backend().frame(1), Rect::new(0, 25, 495, 600));
+        assert_eq!(m.backend().frame(2), Rect::new(505, 25, 495, 295));
+        assert_eq!(m.backend().frame(3), Rect::new(505, 330, 495, 295));
+    }
+
+    #[test]
+    fn balance_undoes_resizes_both_ways() {
+        let mut m = left_one_right_two();
+        let fresh: Vec<Rect> = (1..=3).map(|id| m.backend().frame(id)).collect();
+        // The bottom right window made wider and taller.
+        m.backend.focused = Some(3);
+        m.execute(&Command::Resize(Direction::Left, Some(0.2)))
+            .unwrap();
+        m.execute(&Command::Resize(Direction::Up, Some(0.2)))
+            .unwrap();
+        assert_ne!(m.backend().frame(3), fresh[2]);
+        m.execute(&Command::Balance).unwrap();
+        let now: Vec<Rect> = (1..=3).map(|id| m.backend().frame(id)).collect();
+        assert_eq!(now, fresh);
+        // `balance area` gives the left window a third instead.
+        m.execute(&Command::BalanceArea).unwrap();
+        assert_eq!(m.backend().frame(1).w, 330);
+    }
+
+    #[test]
+    fn moving_a_window_just_opened_does_not_float_it() {
+        // Two on the left, one on the right; the last one just opened.
+        let mut m = manager(0.0);
+        open_many(&mut m, 1, 1, "Safari", (0, 0));
+        open_many(&mut m, 2, 1, "Notes", (0, 0));
+        m.backend.focused = Some(1);
+        m.refresh();
+        open_many(&mut m, 3, 1, "Terminal", (0, 0));
+        assert_eq!(m.tree().len(), 3);
+        // Swapped, warped and resized right away: all stay tiled.
+        m.backend.focused = Some(3);
+        m.execute(&Command::Swap(Direction::Right)).unwrap();
+        m.refresh();
+        m.execute(&Command::Warp(Direction::Left)).unwrap();
+        m.refresh();
+        m.execute(&Command::Resize(Direction::Right, Some(0.1)))
+            .unwrap();
+        m.refresh();
+        settle(&mut m);
+        assert_eq!(m.tree().len(), 3, "{:?}", m.tree().windows());
+        assert_tidy(&m);
+    }
+
+    #[test]
+    fn warp_down_onto_the_window_below() {
+        let mut m = left_one_right_two();
+        m.backend.focused = Some(2);
+        m.execute(&Command::Warp(Direction::Down)).unwrap();
+        assert_eq!(m.backend().frame(3), Rect::new(505, 25, 495, 295));
+        assert_eq!(m.backend().frame(2), Rect::new(505, 330, 495, 295));
+        assert_eq!(m.backend().frame(1), Rect::new(0, 25, 495, 600));
+    }
+
+    #[test]
+    fn warp_refuses_a_place_with_no_room() {
+        let mut m = left_one_right_two();
+        // Window 1 cannot be split down to half its height, though taking
+        // room from the others would make it fit.
+        m.min_sizes.insert(1, (0, 400));
+        let before = m.tree().clone();
+        m.backend.focused = Some(3);
+        assert!(m.execute(&Command::Warp(Direction::Left)).is_err());
+        assert_eq!(m.tree(), &before);
     }
 
     #[test]
