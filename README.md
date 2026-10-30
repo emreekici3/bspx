@@ -36,7 +36,7 @@
 <details><summary>Resize — <code>bspx resize</code></summary><br><img src="assets/demo/resize.gif" width="800" alt="Resize"></details>
 <details><summary>Rotate — <code>bspx rotate</code></summary><br><img src="assets/demo/rotate.gif" width="800" alt="Rotate"></details>
 <details><summary>Toggle split — <code>bspx toggle-split</code></summary><br><img src="assets/demo/toggle-split.gif" width="800" alt="Toggle split"></details>
-<details><summary>Balance — <code>bspx balance</code></summary><br><img src="assets/demo/balancee.gif" width="800" alt="Balance"></details>
+<details><summary>Balance — <code>bspx balance</code></summary><br><img src="assets/demo/balance-v2.gif" width="800" alt="Balance"></details>
 <details><summary>Zoom — <code>bspx zoom</code></summary><br><img src="assets/demo/zoom.gif" width="800" alt="Zoom"></details>
 <details><summary>Zoom parent — <code>bspx zoom parent</code></summary><br><img src="assets/demo/zoom-parent.gif" width="800" alt="Zoom parent"></details>
 <details><summary>Float — <code>bspx float</code></summary><br><img src="assets/demo/float.gif" width="800" alt="Float"></details>
