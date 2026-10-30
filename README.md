@@ -108,7 +108,7 @@ If windows stop moving after an update, macOS has dropped the permission for the
 | `bspx raise-floating` | Bring floating windows to the front |
 | `bspx query` | List windows with their app names |
 | `bspx config <key> [value]` | Show or change a setting |
-| `bspx rule float\|tile "<app>"` | Never tile an app's windows, or tile them again |
+| `bspx rule float\|tile "<app>"` | Never tile an app's windows, or tile them again; `"/regex/"` matches app names by pattern |
 | `bspx rule space <space> "<app>"` | Send an app's new windows to a Space |
 | `bspx rule grid <rows:cols:x:y:w:h> "<app>"` | Open an app's new windows floating at a grid cell, e.g. `4:4:3:0:1:1` is the top-right quarter of the top-right quarter |
 | `bspx label [<n> <name>]` | Name Space `n`; alone, list the Spaces |
@@ -256,6 +256,16 @@ bspx reload
 | `log_level` | `error`, `warn`, `info` or `debug`; try `debug` when something misbehaves | `info` |
 
 `bspx rule float "<app>"` keeps an app's windows out of the layout. In rules, use the app name exactly as `bspx query` shows it; on a non-English Mac it is the localized name (e.g. `"Sistem Ayarları"`). The built-in float rules use the English names (System Settings, Calculator, Archive Utility), so add your own with the local names.
+
+An app name between slashes is a regular expression, searched for anywhere in the name. It helps with apps whose name changes or is hard to type:
+
+```sh
+bspx rule float "/Webex/"          # any app with Webex in its name
+bspx rule float "/^Zoom/"          # names starting with Zoom
+bspx rule space 3 "/(?i)slack/"    # ignoring case
+```
+
+Any other name must match exactly, so names with brackets or dots need no escaping. `bspx query` ends a floating window's line with the rule that floats it, e.g. `rule: /Webex/`; a window without one matched no rule.
 
 Floating windows cannot be kept above tiled ones without disabling SIP, so bspx does not try; `bspx raise-floating` brings them all back to the front when you need them.
 

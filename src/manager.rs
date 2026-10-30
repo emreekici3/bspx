@@ -1817,8 +1817,20 @@ impl<B: Backend> Manager<B> {
                 ""
             };
             let app = self.apps.get(&id).map_or("?", String::as_str);
+            // Which `bspx rule float` floats the window, so a rule that
+            // does or does not match is easy to see.
+            let rule = if state == "floating" {
+                self.config
+                    .float_apps
+                    .iter()
+                    .find(|r| app_matches(r, app))
+                    .map(|r| format!("\trule: {r}"))
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
             out.push_str(&format!(
-                "{id}\t{app}\t{},{} {}x{}\t{state}{focus}\n",
+                "{id}\t{app}\t{},{} {}x{}\t{state}{focus}{rule}\n",
                 f.x, f.y, f.w, f.h
             ));
         }
@@ -2290,6 +2302,58 @@ pub(crate) mod tests {
         m.backend.open(1, "\u{200e}WhatsApp");
         m.refresh();
         assert!(m.tree().is_empty());
+    }
+
+    #[test]
+    fn regex_float_rules_float_matching_windows() {
+        let mut m = manager(0.0);
+        m.backend.open(1, "Webex");
+        m.backend.open(2, "Safari");
+        m.refresh();
+        assert_eq!(m.tree().len(), 2);
+        // A rule added at runtime floats the windows already tiled.
+        m.execute(&Command::Rule {
+            float: true,
+            app: "/Webex/".into(),
+        })
+        .unwrap();
+        assert!(!m.tree().contains(1));
+        assert!(m.tree().contains(2));
+        // And windows opened later.
+        m.backend.open(3, "Cisco Webex Meetings");
+        m.refresh();
+        assert!(!m.tree().contains(3));
+        let q = m.describe();
+        assert!(
+            q.contains("Cisco Webex Meetings\t") && q.contains("rule: /Webex/"),
+            "{q}"
+        );
+        assert!(
+            !q.lines()
+                .any(|l| l.contains("Safari") && l.contains("rule:")),
+            "{q}"
+        );
+        // Taking the rule back tiles them again.
+        m.execute(&Command::Rule {
+            float: false,
+            app: "/Webex/".into(),
+        })
+        .unwrap();
+        m.refresh();
+        assert!(m.tree().contains(1) && m.tree().contains(3));
+    }
+
+    #[test]
+    fn plain_rules_with_regex_characters_match_exactly() {
+        let mut m = manager(0.0);
+        let mut config = Config::default();
+        config.set_float_app("Code (Insiders)", true);
+        m.set_config(config);
+        m.backend.open(1, "Code (Insiders)");
+        m.backend.open(2, "Code Insiders");
+        m.refresh();
+        assert!(!m.tree().contains(1));
+        assert!(m.tree().contains(2));
     }
 
     #[test]

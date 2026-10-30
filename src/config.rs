@@ -151,12 +151,62 @@ pub const KEYS: &[&str] = &[
     "log_level",
 ];
 
-/// Whether a rule's app name matches a window's app name. Both are compared
+/// Whether a rule's app pattern matches a window's app name.
+///
+/// A pattern between slashes, such as `/Webex/`, is a regular expression
+/// searched for anywhere in the name (anchor it with `^` and `$`, ignore case
+/// with `(?i)`). Any other pattern must equal the name. Names are compared
 /// without invisible formatting characters and surrounding whitespace: some
 /// apps put such characters in their names (WhatsApp reports itself as
 /// "\u{200e}WhatsApp"), and the name typed in `bspxrc` cannot contain them.
 pub fn app_matches(rule: &str, app: &str) -> bool {
-    clean_app_name(rule) == clean_app_name(app)
+    let app = clean_app_name(app);
+    match app_regex(rule) {
+        Some(Ok(re)) => re.is_match(&app),
+        Some(Err(_)) => false,
+        None => clean_app_name(rule) == app,
+    }
+}
+
+/// Whether two rules name the same app pattern, so the newer replaces the
+/// older. Patterns are compared as written: `WhatsApp` does not replace
+/// `/Whats/` even though the regex would match it.
+pub fn same_rule(a: &str, b: &str) -> bool {
+    clean_app_name(a) == clean_app_name(b)
+}
+
+/// Checks a rule's app pattern before it is stored: a `/regex/` must be a
+/// valid, non-empty regular expression.
+pub fn check_app_pattern(rule: &str) -> Result<(), String> {
+    match app_regex(rule) {
+        Some(Err(e)) => Err(e),
+        _ => Ok(()),
+    }
+}
+
+/// The regular expression of a `/pattern/` rule, compiled once and cached;
+/// `None` for a plain app name.
+fn app_regex(rule: &str) -> Option<Result<regex::Regex, String>> {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    thread_local! {
+        static CACHE: RefCell<HashMap<String, Result<regex::Regex, String>>> =
+            RefCell::new(HashMap::new());
+    }
+    let rule = clean_app_name(rule);
+    let source = rule.strip_prefix('/')?.strip_suffix('/')?;
+    Some(CACHE.with(|cache| {
+        cache
+            .borrow_mut()
+            .entry(rule.clone())
+            .or_insert_with(|| {
+                if source.is_empty() {
+                    return Err(format!("empty regular expression {rule}"));
+                }
+                regex::Regex::new(source).map_err(|e| format!("bad regular expression {rule}: {e}"))
+            })
+            .clone()
+    }))
 }
 
 /// An app name without invisible formatting characters (direction marks,
@@ -422,13 +472,13 @@ impl Config {
 
     /// `bspx rule space <space> <app>`.
     pub fn set_space_rule(&mut self, app: &str, space: &str) {
-        self.space_rules.retain(|(a, _)| !app_matches(a, app));
+        self.space_rules.retain(|(a, _)| !same_rule(a, app));
         self.space_rules.push((app.to_string(), space.to_string()));
     }
 
     /// `bspx rule grid <rows:cols:x:y:w:h> <app>`.
     pub fn set_grid_rule(&mut self, app: &str, grid: [u32; 6]) {
-        self.grid_rules.retain(|(a, _)| !app_matches(a, app));
+        self.grid_rules.retain(|(a, _)| !same_rule(a, app));
         self.grid_rules.push((app.to_string(), grid));
     }
 
@@ -459,7 +509,7 @@ impl Config {
 
     /// `bspx rule float <app>` / `bspx rule tile <app>`.
     pub fn set_float_app(&mut self, app: &str, float: bool) {
-        self.float_apps.retain(|a| !app_matches(a, app));
+        self.float_apps.retain(|a| !same_rule(a, app));
         if float {
             self.float_apps.push(app.to_string());
         }
@@ -608,6 +658,48 @@ mod tests {
         c.set_float_app("WhatsApp", true);
         c.set_float_app("\u{200e}WhatsApp", true);
         assert_eq!(c.float_apps.len(), Config::default().float_apps.len() + 1);
+    }
+
+    #[test]
+    fn regex_rules() {
+        assert!(app_matches("/Webex/", "Cisco Webex Meetings"));
+        assert!(app_matches("/Webex/", "Webex"));
+        assert!(app_matches("/^Webex$/", "Webex"));
+        assert!(!app_matches("/^Webex$/", "Cisco Webex Meetings"));
+        assert!(app_matches("/(?i)whatsapp/", "\u{200e}WhatsApp"));
+        assert!(app_matches("/^WhatsApp$/", "\u{200e}WhatsApp"));
+        assert!(!app_matches("/webex/", "Webex"));
+        // A plain name is still matched exactly, even with regex characters.
+        assert!(app_matches("Code (Insiders)", "Code (Insiders)"));
+        assert!(!app_matches("Code (Insiders)", "Code X"));
+        // Only a name between slashes is a pattern.
+        assert!(!app_matches("/Webex", "Webex"));
+        assert!(app_matches("/Webex", "/Webex"));
+    }
+
+    #[test]
+    fn bad_regex_rules_are_rejected_and_never_match() {
+        assert!(check_app_pattern("/Webex/").is_ok());
+        assert!(check_app_pattern("WhatsApp").is_ok());
+        assert!(check_app_pattern("(").is_ok());
+        assert!(check_app_pattern("/(/").is_err());
+        assert!(check_app_pattern("//").is_err());
+        assert!(!app_matches("/(/", "("));
+    }
+
+    #[test]
+    fn a_rule_replaces_only_the_same_pattern() {
+        let mut c = Config::default();
+        c.set_float_app("/Whats/", true);
+        c.set_float_app("WhatsApp", true);
+        assert!(c.float_apps.contains(&"/Whats/".to_string()));
+        assert!(c.float_apps.contains(&"WhatsApp".to_string()));
+        c.set_float_app("/Whats/", false);
+        assert!(!c.float_apps.contains(&"/Whats/".to_string()));
+        assert!(c.float_apps.contains(&"WhatsApp".to_string()));
+        c.set_space_rule("/Webex/", "2");
+        c.set_space_rule("/Webex/", "3");
+        assert_eq!(c.space_rules, vec![("/Webex/".into(), "3".into())]);
     }
 
     #[test]
