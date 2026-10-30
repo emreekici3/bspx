@@ -3,7 +3,7 @@ name = "bspx"
 version = "0.2.0"
 edition = "2024"
 description = "A BSP tiling window manager for macOS with smooth animations."
-license = "GPL-3.0-only"
+license = "MIT"
 
 [dependencies]
 log = "0.4"
