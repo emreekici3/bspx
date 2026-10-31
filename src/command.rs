@@ -42,6 +42,9 @@ pub enum Command {
     ToggleFloat,
     /// Bring every floating window on the current Space to the front.
     RaiseFloating,
+    /// Float the focused window and put it at a grid cell:
+    /// `[rows, cols, x, y, w, h]`.
+    Grid([u32; 6]),
     /// Re-read windows and snap everything back into place.
     Retile,
     /// Re-run the config script from a clean slate.
@@ -84,6 +87,8 @@ commands:
   zoom [fullscreen|parent]                 toggle zoom for the focused window
   float                                    toggle tiling for the focused window
   raise-floating                           bring floating windows to the front
+  grid <r:c:x:y:w:h>                       float the focused window at a grid cell,
+                                           e.g. grid 6:6:1:1:4:4 (centred)
   space <space>                            switch to a Space
   layout <space> <bsp|float>               tile a Space, or leave its windows be
   send <space>                             move the focused window to a Space
@@ -150,6 +155,12 @@ impl Command {
             }),
             Some("float") => no_args(Command::ToggleFloat)?,
             Some("raise-floating") => no_args(Command::RaiseFloating)?,
+            Some("grid") => {
+                if words.len() != 2 {
+                    return Err("grid: expected rows:cols:x:y:w:h".into());
+                }
+                Command::Grid(parse_grid(words[1])?)
+            }
             Some("retile") => no_args(Command::Retile)?,
             Some("reload") => no_args(Command::Reload)?,
             Some("bind") => {
@@ -257,6 +268,7 @@ impl Command {
             | Command::Warp(_)
             | Command::BalanceArea
             | Command::Zoom(_)
+            | Command::Grid(_)
             | Command::Send(_)
             | Command::Space(_) => 2,
             Command::Resize(..) | Command::Label(_) | Command::Layout { .. } => 3,
@@ -271,7 +283,7 @@ impl Command {
 
 /// Parses `rows:cols:x:y:w:h`, checking that the cell lies inside the grid.
 pub fn parse_grid(spec: &str) -> Result<[u32; 6], String> {
-    let bad = || format!("rule grid: expected rows:cols:x:y:w:h, got '{spec}'");
+    let bad = || format!("grid: expected rows:cols:x:y:w:h, got '{spec}'");
     let nums = spec
         .split(':')
         .map(|n| n.parse::<u32>().map_err(|_| bad()))
@@ -279,11 +291,11 @@ pub fn parse_grid(spec: &str) -> Result<[u32; 6], String> {
     let grid: [u32; 6] = nums.try_into().map_err(|_| bad())?;
     let [rows, cols, x, y, w, h] = grid;
     if rows == 0 || cols == 0 || w == 0 || h == 0 {
-        return Err("rule grid: rows, cols, width and height must be at least 1".into());
+        return Err("grid: rows, cols, width and height must be at least 1".into());
     }
     if x + w > cols || y + h > rows {
         return Err(format!(
-            "rule grid: cell {x}:{y}:{w}:{h} does not fit a {rows}x{cols} grid"
+            "grid: cell {x}:{y}:{w}:{h} does not fit a {rows}x{cols} grid"
         ));
     }
     Ok(grid)
@@ -403,6 +415,13 @@ mod tests {
             Ok(Command::Zoom(Zoom::Parent))
         );
         assert_eq!(Command::parse("raise-floating"), Ok(Command::RaiseFloating));
+        assert_eq!(
+            Command::parse("grid 6:6:1:1:4:4"),
+            Ok(Command::Grid([6, 6, 1, 1, 4, 4]))
+        );
+        assert!(Command::parse("grid").is_err());
+        assert!(Command::parse("grid 2:2:1:0:2:1").is_err());
+        assert!(Command::parse("grid 2:2:0:0:1:1 extra").is_err());
         assert_eq!(
             Command::parse("config animation 0.25"),
             Ok(Command::Config {
