@@ -106,6 +106,7 @@ If windows stop moving after an update, macOS has dropped the permission for the
 | `bspx zoom [fullscreen\|parent]` | Grow the focused window over the others to the full screen (default) or its split's area; run again to put it back |
 | `bspx float` | Float or tile the focused window |
 | `bspx raise-floating` | Bring floating windows to the front |
+| `bspx grid <rows:cols:x:y:w:h>` | Float the focused window and put it at a grid cell, e.g. `6:6:1:1:4:4` centres it at two thirds of the screen |
 | `bspx query` | List windows with their app names |
 | `bspx config <key> [value]` | Show or change a setting |
 | `bspx rule float\|tile "<app>"` | Never tile an app's windows, or tile them again; `"/regex/"` matches app names by pattern |
@@ -157,6 +158,7 @@ bspx bind 'shift + alt - m : bspx zoom parent'
 bspx bind 'alt - t : bspx float'
 bspx bind 'alt - f : bspx raise-floating'
 
+bspx bind 'alt - g : bspx grid 6:6:1:1:4:4'
 bspx bind 'alt - return : open -na Terminal'
 ```
 

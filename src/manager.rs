@@ -1710,6 +1710,34 @@ impl<B: Backend> Manager<B> {
                     info!("window {win} tiled");
                 }
             }
+            Command::Grid(grid) => {
+                let win = self
+                    .backend
+                    .focused_window()
+                    .or(self.focused)
+                    .ok_or("no window is focused")?;
+                let now = self
+                    .frames
+                    .get(&win)
+                    .copied()
+                    .ok_or("the focused window is not managed")?;
+                let area = self.inner_area();
+                let cell = area.grid_cell(grid);
+                // One that cannot be resized keeps its size, as with a rule.
+                let frame = if self.manageable.contains(&win) {
+                    cell
+                } else {
+                    area.align_in(cell, now.w, now.h)
+                };
+                if self.tree.remove(win) {
+                    self.focused = self.tree.windows().last().copied();
+                }
+                self.floating.insert(win);
+                self.anim.cancel(win);
+                self.backend.update_frame(win, frame, now);
+                self.frames.insert(win, frame);
+                info!("window {win} floats at grid {grid:?}: {frame:?}");
+            }
             Command::RaiseFloating => {
                 let focused_now = self.backend.focused_window();
                 let mut floats: Vec<WinId> = self
@@ -3643,6 +3671,32 @@ pub(crate) mod tests {
         m.backend.focused = Some(2);
         m.execute(&Command::ToggleFloat).unwrap();
         assert_eq!(m.tree().windows(), vec![1, 2]);
+    }
+
+    #[test]
+    fn grid_command_floats_the_focused_window_at_a_cell() {
+        let mut m = manager(0.0);
+        m.backend.open(1, "Terminal");
+        m.backend.open(2, "Notes");
+        m.refresh();
+        assert_eq!(m.tree().windows(), vec![1, 2]);
+        m.backend.focused = Some(2);
+        m.execute(&Command::Grid([2, 2, 1, 0, 1, 1])).unwrap();
+        assert_eq!(m.tree().windows(), vec![1]);
+        assert_eq!(m.backend().frame(2), Rect::new(500, 25, 500, 300));
+        // It stays floating: later polls leave it be.
+        m.refresh();
+        assert_eq!(m.tree().windows(), vec![1]);
+        assert_eq!(m.backend().frame(2), Rect::new(500, 25, 500, 300));
+        // Already floating: it just moves to another cell.
+        m.execute(&Command::Grid([2, 2, 0, 1, 1, 1])).unwrap();
+        assert_eq!(m.backend().frame(2), Rect::new(0, 325, 500, 300));
+    }
+
+    #[test]
+    fn grid_command_needs_a_focused_window() {
+        let mut m = manager(0.0);
+        assert!(m.execute(&Command::Grid([2, 2, 0, 0, 1, 1])).is_err());
     }
 
     #[test]
