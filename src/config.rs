@@ -92,7 +92,7 @@ impl Default for Config {
             gap: 8,
             padding: Padding::uniform(8),
             animation_speed: 12.0,
-            animation_easing: Easing::EaseOut,
+            animation_easing: Easing::Spring,
             split_ratio: 0.5,
             resize_step: 0.05,
             poll_interval_ms: 150,
@@ -336,8 +336,9 @@ impl Config {
             }
             "animation_easing" | "easing" => {
                 let v = one(key, args)?;
-                self.animation_easing = Easing::parse(v)
-                    .ok_or_else(|| format!("{key}: expected ease_out or ease_in_out, got '{v}'"))?;
+                self.animation_easing = Easing::parse(v).ok_or_else(|| {
+                    format!("{key}: expected spring, ease_in_out or ease_out, got '{v}'")
+                })?;
             }
             "split_ratio" => {
                 let v: f32 = number(key, one(key, args)?)?;
@@ -580,7 +581,7 @@ mod tests {
     #[test]
     fn easing_setting() {
         let mut c = Config::default();
-        assert_eq!(c.get("animation_easing").unwrap(), "ease_out");
+        assert_eq!(c.get("animation_easing").unwrap(), "spring");
         c.set("animation_easing", &["ease_in_out"]).unwrap();
         assert_eq!(c.animation_easing, Easing::EaseInOut);
         c.set("easing", &["ease_out"]).unwrap();

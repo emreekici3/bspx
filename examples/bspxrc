@@ -10,9 +10,10 @@ bspx config padding 8 8 8 8
 # How long a window takes to slide into place, in seconds (0 = off).
 bspx config animation 0.25
 
-# Animation curve: ease_in_out (speeds up, then settles: smoothest) or
+# Animation curve: spring (keeps its speed when a window is sent somewhere
+# new mid-flight: smoothest), ease_in_out (speeds up, then settles) or
 # ease_out (starts at full speed: snappiest).
-bspx config animation_easing ease_in_out
+bspx config animation_easing spring
 
 # Share the old window keeps when a new one splits it.
 bspx config split_ratio 0.5

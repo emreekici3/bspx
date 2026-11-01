@@ -225,7 +225,7 @@ The config is a shell script at `~/.config/bspx/bspxrc`, run on startup:
 bspx config gap 8
 bspx config padding 8 8 8 8
 bspx config animation 0.25
-bspx config animation_easing ease_in_out
+bspx config animation_easing spring
 bspx rule float "System Settings"
 ```
 
@@ -242,7 +242,7 @@ bspx reload
 | `gap` | Space between windows | `8` |
 | `padding` | Space around the edges | `8 8 8 8` |
 | `animation` | Animation duration in seconds, `0` to disable | `0.42` |
-| `animation_easing` | `ease_in_out` or `ease_out` | `ease_out` |
+| `animation_easing` | `spring`, `ease_in_out` or `ease_out` | `spring` |
 | `split_ratio` | Share the old window keeps when split | `0.5` |
 | `resize_step` | Step for `bspx resize` | `0.05` |
 | `drag_swap` | Swap windows by drag and drop, `on` / `off` | `on` |

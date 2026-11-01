@@ -18,6 +18,10 @@ use crate::platform::Backend;
 const ACTIVE_FRAME: Duration = Duration::from_micros(8_333);
 /// Loop interval when nothing is moving.
 const IDLE_FRAME: Duration = Duration::from_millis(16);
+/// Polls wait while windows are moving, so a poll's window-server and
+/// Accessibility queries do not make an animation frame late; but never
+/// longer than this. Closed windows are handled by events in the meantime.
+const MAX_POLL_DELAY: Duration = Duration::from_millis(500);
 /// How long to hold off tiling at startup while the config script runs, so
 /// windows are laid out once with the user's settings instead of jumping
 /// from the defaults.
@@ -145,7 +149,10 @@ pub fn run<B: Backend>(
             last_poll = Instant::now();
         }
 
-        if started && last_poll.elapsed() >= poll_interval(manager.config()) {
+        let since_poll = last_poll.elapsed();
+        let poll_due = since_poll >= poll_interval(manager.config())
+            && (!manager.is_animating() || since_poll >= MAX_POLL_DELAY);
+        if started && poll_due {
             last_poll = Instant::now();
             manager.refresh();
         }

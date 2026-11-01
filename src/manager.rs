@@ -1467,7 +1467,15 @@ impl<B: Backend> Manager<B> {
     /// Advances animations by `dt` seconds and pushes the new frames.
     pub fn tick(&mut self, dt: f64) {
         self.clock += dt;
-        for (id, frame) in self.anim.step(dt) {
+        let mut moves = self.anim.step(dt);
+        // Windows making room go first: a window that grows into the space
+        // a neighbour has not left yet would cover it for a frame.
+        moves.sort_by_key(|(id, frame)| {
+            self.frames
+                .get(id)
+                .is_some_and(|prev| frame.w > prev.w || frame.h > prev.h)
+        });
+        for (id, frame) in moves {
             match self.frames.insert(id, frame) {
                 Some(prev) => self.backend.update_frame(id, frame, prev),
                 None => self.backend.set_frame(id, frame),
@@ -1950,6 +1958,8 @@ pub(crate) mod tests {
         pub menu: Option<Rect>,
         /// Spotlight (or the like) is open.
         pub panel: bool,
+        /// Every window a frame was written to, in order.
+        pub writes: Vec<WinId>,
     }
 
     impl MockBackend {
@@ -2006,6 +2016,7 @@ pub(crate) mod tests {
         }
         fn set_frame(&mut self, id: WinId, frame: Rect) {
             let (min_w, min_h) = self.min.get(&id).copied().unwrap_or((0, 0));
+            self.writes.push(id);
             if let Some(w) = self.windows.iter_mut().find(|w| w.id == id) {
                 w.frame = Rect::new(frame.x, frame.y, frame.w.max(min_w), frame.h.max(min_h));
             }
@@ -2713,24 +2724,38 @@ pub(crate) mod tests {
 
     #[test]
     fn retarget_during_animation_is_smooth() {
-        let mut m = manager(12.0);
-        m.backend.open(1, "a");
-        m.refresh();
-        settle(&mut m);
-        m.backend.open(2, "b");
-        m.refresh();
-        for _ in 0..3 {
+        use crate::anim::Easing;
+        for easing in [Easing::EaseOut, Easing::Spring] {
+            let mut m = manager(12.0);
+            m.anim.set_easing(easing);
+            m.backend.open(1, "a");
+            m.refresh();
+            settle(&mut m);
+            m.backend.open(2, "b");
+            m.refresh();
+            for _ in 0..3 {
+                m.tick(1.0 / 60.0);
+            }
+            let mid = m.backend().frame(1);
+            m.backend.close(2);
+            m.refresh();
             m.tick(1.0 / 60.0);
+            let next = m.backend().frame(1);
+            match easing {
+                // Window 1 turns around from where it was instead of jumping.
+                Easing::EaseOut => {
+                    assert!(next.w > mid.w && next.w < 1000, "{mid:?} -> {next:?}");
+                }
+                // The spring brakes first, then turns: no jump either way.
+                _ => assert!((next.w - mid.w).abs() < 60, "{mid:?} -> {next:?}"),
+            }
+            for _ in 0..6 {
+                m.tick(1.0 / 60.0);
+            }
+            assert!(m.backend().frame(1).w > mid.w, "{easing:?} turned around");
+            settle(&mut m);
+            assert_eq!(m.backend().frame(1), Rect::new(0, 25, 1000, 600));
         }
-        let mid = m.backend().frame(1);
-        m.backend.close(2);
-        m.refresh();
-        m.tick(1.0 / 60.0);
-        let next = m.backend().frame(1);
-        // Window 1 turns around from where it was instead of jumping.
-        assert!(next.w > mid.w && next.w < 1000, "{mid:?} -> {next:?}");
-        settle(&mut m);
-        assert_eq!(m.backend().frame(1), Rect::new(0, 25, 1000, 600));
     }
 
     /// Simulates the user dragging window `id` to `frame` with the mouse,
@@ -4176,6 +4201,28 @@ pub(crate) mod tests {
                 before,
                 "window {grow} {dir:?} then {back:?}: one press back moves the border"
             );
+        }
+    }
+    #[test]
+    fn a_window_makes_room_before_its_neighbour_grows_into_it() {
+        for (grow, dir) in [(1, Direction::Right), (2, Direction::Left)] {
+            let mut m = manager(12.0);
+            m.backend.open(1, "a");
+            m.refresh();
+            m.backend.open(2, "b");
+            m.refresh();
+            settle(&mut m);
+            m.backend.focused = Some(grow);
+            m.refresh();
+            m.execute(&Command::Resize(dir, Some(0.2))).unwrap();
+            for _ in 0..5 {
+                m.backend.writes.clear();
+                m.tick(1.0 / 60.0);
+                let shrink = 3 - grow;
+                let order = &m.backend().writes;
+                assert_eq!(order.len(), 2, "{order:?}");
+                assert_eq!(order[0], shrink, "window {shrink} goes first: {order:?}");
+            }
         }
     }
 }
