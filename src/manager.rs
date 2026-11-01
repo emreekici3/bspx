@@ -619,8 +619,9 @@ impl<B: Backend> Manager<B> {
         if !self.anim.is_idle() || self.drag != Drag::None {
             return false;
         }
+        let mins = self.likely_min_sizes(&without.windows());
         let before: HashMap<WinId, Rect> = without
-            .layout_with(self.inner_area(), self.config.gap, &self.min_sizes)
+            .layout_with(self.inner_area(), self.config.gap, &mins)
             .into_iter()
             .collect();
         let mut over = false;
@@ -659,6 +660,14 @@ impl<B: Backend> Manager<B> {
 
     /// The minimum sizes of `ids` as far as they are known: what each window
     /// refused, or what other windows of its app did, whichever is larger.
+    /// The minimum sizes the layout is made with: what each window refused,
+    /// or what other windows of its app did. Everything that lays out the
+    /// tree uses these, so the frames bspx reasons about are the ones it
+    /// sends.
+    fn layout_mins(&self) -> MinSizes {
+        self.likely_min_sizes(&self.tree.windows())
+    }
+
     fn likely_min_sizes(&self, ids: &[WinId]) -> MinSizes {
         ids.iter()
             .map(|id| {
@@ -1506,9 +1515,10 @@ impl<B: Backend> Manager<B> {
         let area = self.inner_area();
         let rect = match zoom {
             Zoom::Fullscreen => self.tree.contains(win).then_some(area)?,
-            Zoom::Parent => self
-                .tree
-                .parent_rect(win, area, self.config.gap, &self.min_sizes)?,
+            Zoom::Parent => {
+                self.tree
+                    .parent_rect(win, area, self.config.gap, &self.layout_mins())?
+            }
         };
         Some((win, rect))
     }
@@ -1517,7 +1527,7 @@ impl<B: Backend> Manager<B> {
     /// of a window are, for `focus` and `swap`.
     fn slots(&self) -> Vec<(WinId, Rect)> {
         self.tree
-            .layout_with(self.inner_area(), self.config.gap, &self.min_sizes)
+            .layout_with(self.inner_area(), self.config.gap, &self.layout_mins())
     }
 
     /// Sends every tiled window toward its slot in the tree.
@@ -1640,16 +1650,16 @@ impl<B: Backend> Manager<B> {
             Command::Resize(dir, amount) => {
                 let win = focused()?;
                 let amount = amount.unwrap_or(self.config.resize_step);
-                let (area, gap) = (self.inner_area(), self.config.gap);
+                let (area, gap, mins) = (self.inner_area(), self.config.gap, self.layout_mins());
                 // Start from the shares windows really have, so a step
                 // always moves the border from where it is on screen.
-                self.tree.settle_ratios(area, gap, &self.min_sizes);
+                self.tree.settle_ratios(area, gap, &mins);
                 let before = self.tree.clone();
                 if !self.tree.resize(win, dir, amount) {
                     return Err("nothing to resize in that direction".into());
                 }
-                self.tree.settle_ratios(area, gap, &self.min_sizes);
-                if self.slots() == before.layout_with(area, gap, &self.min_sizes) {
+                self.tree.settle_ratios(area, gap, &mins);
+                if self.slots() == before.layout_with(area, gap, &mins) {
                     self.tree = before;
                     return Err("a window there is at its minimum size".into());
                 }
@@ -1675,7 +1685,12 @@ impl<B: Backend> Manager<B> {
                     if zoom == Zoom::Parent
                         && self
                             .tree
-                            .parent_rect(win, self.inner_area(), self.config.gap, &self.min_sizes)
+                            .parent_rect(
+                                win,
+                                self.inner_area(),
+                                self.config.gap,
+                                &self.layout_mins(),
+                            )
                             .is_none()
                     {
                         return Err("the window is not split".into());
@@ -4125,5 +4140,42 @@ pub(crate) mod tests {
         m.backend.area = Rect::new(0, 0, 800, 500);
         m.refresh();
         assert_eq!(m.backend().frame(1), Rect::new(0, 0, 800, 500));
+    }
+    /// Two windows of an app whose minimum is already known from another
+    /// of its windows (as Terminal's 160 was from a window closed before).
+    /// Neither window learns a minimum of its own, since each fits the
+    /// slot the app's minimum gave it.
+    #[test]
+    fn resize_back_moves_at_once_with_an_app_minimum() {
+        for (grow, dir, back) in [
+            (1, Direction::Right, Direction::Left),
+            (2, Direction::Left, Direction::Right),
+            (2, Direction::Right, Direction::Left),
+            (1, Direction::Left, Direction::Right),
+        ] {
+            let mut m = manager(0.0);
+            m.app_mins.insert("Terminal".into(), (160, 0));
+            m.backend.open(1, "Terminal");
+            m.refresh();
+            m.backend.open(2, "Terminal");
+            m.backend.min.insert(1, (160, 0));
+            m.backend.min.insert(2, (160, 0));
+            m.refresh();
+            m.backend.focused = Some(grow);
+            m.refresh();
+            for _ in 0..30 {
+                let _ = m.execute(&Command::Resize(dir, Some(0.05)));
+                m.refresh();
+            }
+            assert!(m.min_sizes.is_empty(), "no own minimum is learned");
+            let before = (m.backend().frame(1), m.backend().frame(2));
+            m.execute(&Command::Resize(back, Some(0.05)))
+                .unwrap_or_else(|e| panic!("window {grow} {dir:?} then {back:?}: {e}"));
+            assert_ne!(
+                (m.backend().frame(1), m.backend().frame(2)),
+                before,
+                "window {grow} {dir:?} then {back:?}: one press back moves the border"
+            );
+        }
     }
 }
