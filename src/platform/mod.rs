@@ -67,6 +67,12 @@ pub trait Backend {
     fn update_frame(&mut self, id: WinId, frame: Rect, _prev: Rect) {
         self.set_frame(id, frame);
     }
+    /// Like [`update_frame`](Self::update_frame), for a frame in the middle
+    /// of an animation: one that will be followed by more, so it may favour
+    /// how the window looks over where it is safe to put it.
+    fn animate_frame(&mut self, id: WinId, frame: Rect, prev: Rect) {
+        self.update_frame(id, frame, prev);
+    }
     /// Gives a window keyboard focus and raises it.
     fn focus(&mut self, id: WinId);
     /// Whether the left mouse button is held (the user may be dragging a window).
@@ -181,4 +187,102 @@ pub struct Overlay {
     pub above: WinId,
     /// RGBA, 0..=1.
     pub color: [f32; 4],
+}
+
+/// Whether to move a window before resizing it when both change in one
+/// animation frame. The window spends a moment between the two writes at
+/// one of two in-between frames, and a slow app (Safari) shows it.
+///
+/// An edge that is moving anyway can lag a frame unnoticed; an edge that
+/// should stand still must not draw back from where it is, or the window
+/// shows a gap that flickers there every frame. So when one side of the
+/// window is still and the other moves, the order keeps the still side
+/// covered: shrinking from the left, move first (for a moment the window
+/// reaches past its right edge); growing to the left, resize first.
+///
+/// Otherwise growing moves first and shrinking resizes first, so a window
+/// never pushes against the screen edge on its way.
+///
+/// macOS lets a move take a window past the edge of the `display` but cuts
+/// a resize short there (Safari asked for 688 points at x 838 on a
+/// 1512-point screen gets 674, and keeps them once moved). So resizing
+/// first is only done when the new size fits where the window still is.
+pub fn position_first(frame: Rect, prev: Rect, display: Rect) -> bool {
+    let grows = frame.w > prev.w || frame.h > prev.h;
+    let resized_in_place = Rect::new(prev.x, prev.y, frame.w, frame.h);
+    let fits = display.w == 0
+        || (resized_in_place.max_x() <= display.max_x()
+            && resized_in_place.max_y() <= display.max_y());
+    // Per axis: Some(order) when only the near edge moves.
+    let axis = |pos: i32, prev_pos: i32, len: i32, prev_len: i32| {
+        (pos != prev_pos && pos + len == prev_pos + prev_len).then_some(len < prev_len)
+    };
+    let x = axis(frame.x, prev.x, frame.w, prev.w);
+    let y = axis(frame.y, prev.y, frame.h, prev.h);
+    let order = match (x, y) {
+        (Some(a), Some(b)) if a != b => grows,
+        (Some(order), _) | (None, Some(order)) => order,
+        (None, None) => grows,
+    };
+    order || !fits
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Room to spare around every frame in these tests.
+    const BIG: Rect = Rect {
+        x: 0,
+        y: 0,
+        w: 4000,
+        h: 4000,
+    };
+
+    #[test]
+    fn a_still_right_edge_never_draws_back() {
+        // The right window of two shrinks as the left one grows into it.
+        let prev = Rect::new(600, 0, 400, 500);
+        let shrunk = Rect::new(620, 0, 380, 500);
+        assert!(position_first(shrunk, prev, BIG));
+        // Moved first, it still reaches the old right edge.
+        assert!(shrunk.x + prev.w >= prev.max_x());
+        // The right window grows to the left.
+        let grown = Rect::new(580, 0, 420, 500);
+        assert!(!position_first(grown, prev, BIG));
+        // Resized first, it still reaches the right edge.
+        assert!(prev.x + grown.w >= grown.max_x());
+    }
+
+    #[test]
+    fn a_still_bottom_edge_never_draws_back() {
+        let prev = Rect::new(0, 300, 500, 300);
+        assert!(position_first(Rect::new(0, 320, 500, 280), prev, BIG));
+        assert!(!position_first(Rect::new(0, 280, 500, 320), prev, BIG));
+    }
+
+    #[test]
+    fn without_a_still_far_edge_the_screen_edge_rule_holds() {
+        let prev = Rect::new(100, 100, 400, 300);
+        // Both edges move: growing moves first, shrinking resizes first.
+        assert!(position_first(Rect::new(90, 100, 500, 300), prev, BIG));
+        assert!(!position_first(Rect::new(110, 100, 300, 300), prev, BIG));
+        // Only the far edge moves: a plain resize, either order is the same.
+        assert!(position_first(Rect::new(100, 100, 450, 300), prev, BIG));
+    }
+
+    #[test]
+    fn a_resize_that_the_screen_edge_would_cut_short_moves_first() {
+        // Safari against the right edge of a 1512-point screen, growing to
+        // the left by 22 points: resized in place it would need 1526.
+        let screen = Rect::new(0, 0, 1512, 982);
+        let prev = Rect::new(838, 42, 666, 932);
+        let grown = Rect::new(816, 42, 688, 932);
+        assert!(position_first(grown, prev, screen));
+        // A step small enough to fit is still resized first.
+        let nudged = Rect::new(832, 42, 672, 932);
+        assert!(!position_first(nudged, prev, screen));
+        // An unknown display does not hold anything back.
+        assert!(!position_first(grown, prev, Rect::default()));
+    }
 }

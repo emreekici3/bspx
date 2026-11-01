@@ -965,21 +965,75 @@ impl MacBackend {
                 set_attr(element, &self.names.size, v.ptr());
             }
         };
-        if size_first {
-            if resized {
-                set_size();
-            }
-            if moved {
-                set_position();
-            }
+        // `bspx config log_level debug` traces every write: where the window
+        // was asked to go, and where the app put it after each call.
+        let trace = log::log_enabled!(target: "bspx::frames", log::Level::Debug);
+        let read = || trace.then(|| self.ax_frame(element)).flatten();
+        let (first, second): (&dyn Fn(), &dyn Fn()) = if size_first {
+            (
+                &|| {
+                    if resized {
+                        set_size()
+                    }
+                },
+                &|| {
+                    if moved {
+                        set_position()
+                    }
+                },
+            )
         } else {
-            if moved {
-                set_position();
-            }
-            if resized {
-                set_size();
+            (
+                &|| {
+                    if moved {
+                        set_position()
+                    }
+                },
+                &|| {
+                    if resized {
+                        set_size()
+                    }
+                },
+            )
+        };
+        first();
+        let mid = read();
+        second();
+        if trace {
+            let edges = |r: Option<Rect>| {
+                r.map_or_else(
+                    || "?".to_string(),
+                    |r| format!("{}..{} w{}", r.x, r.max_x(), r.w),
+                )
+            };
+            log::debug!(
+                target: "bspx::frames",
+                "window {id} {}: want {} | between {} | after {}",
+                if size_first { "size,pos" } else { "pos,size" },
+                edges(Some(frame)),
+                edges(mid),
+                edges(read()),
+            );
+        }
+    }
+
+    /// Where the app says the window is, from its Accessibility element.
+    fn ax_frame(&self, element: AXUIElementRef) -> Option<Rect> {
+        let mut point = CGPoint::default();
+        let mut size = CGSize::default();
+        unsafe {
+            let pos = copy_attr(element, &self.names.position)?;
+            let sz = copy_attr(element, &self.names.size)?;
+            if AXValueGetValue(pos.ptr(), kAXValueTypeCGPoint, (&raw mut point).cast()) == 0
+                || AXValueGetValue(sz.ptr(), kAXValueTypeCGSize, (&raw mut size).cast()) == 0
+            {
+                return None;
             }
         }
+        Some(cg_to_rect(CGRect {
+            origin: point,
+            size,
+        }))
     }
 }
 
@@ -1078,6 +1132,13 @@ impl Backend for MacBackend {
 
     fn set_frame(&mut self, id: WinId, frame: Rect) {
         self.write_frame(id, frame, true, true, false);
+    }
+
+    fn animate_frame(&mut self, id: WinId, frame: Rect, prev: Rect) {
+        let moved = (frame.x, frame.y) != (prev.x, prev.y);
+        let resized = (frame.w, frame.h) != (prev.w, prev.h);
+        let size_first = !crate::platform::position_first(frame, prev, self.display);
+        self.write_frame(id, frame, moved, resized, size_first);
     }
 
     fn update_frame(&mut self, id: WinId, frame: Rect, prev: Rect) {
@@ -1229,21 +1290,7 @@ impl Backend for MacBackend {
 
     fn window_frame(&mut self, id: WinId) -> Option<Rect> {
         let element = self.windows.get(&id)?.element.ptr();
-        let mut point = CGPoint::default();
-        let mut size = CGSize::default();
-        unsafe {
-            let pos = copy_attr(element, &self.names.position)?;
-            let sz = copy_attr(element, &self.names.size)?;
-            if AXValueGetValue(pos.ptr(), kAXValueTypeCGPoint, (&raw mut point).cast()) == 0
-                || AXValueGetValue(sz.ptr(), kAXValueTypeCGSize, (&raw mut size).cast()) == 0
-            {
-                return None;
-            }
-        }
-        Some(cg_to_rect(CGRect {
-            origin: point,
-            size,
-        }))
+        self.ax_frame(element)
     }
 
     fn show_overlay(&mut self, overlay: Option<Overlay>) {

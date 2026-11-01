@@ -1476,7 +1476,10 @@ impl<B: Backend> Manager<B> {
                 .is_some_and(|prev| frame.w > prev.w || frame.h > prev.h)
         });
         for (id, frame) in moves {
+            // The last frame takes the safe order; it is the one that stays.
+            let more = self.anim.is_animating(id);
             match self.frames.insert(id, frame) {
+                Some(prev) if more => self.backend.animate_frame(id, frame, prev),
                 Some(prev) => self.backend.update_frame(id, frame, prev),
                 None => self.backend.set_frame(id, frame),
             }
@@ -1960,6 +1963,8 @@ pub(crate) mod tests {
         pub panel: bool,
         /// Every window a frame was written to, in order.
         pub writes: Vec<WinId>,
+        /// Whether each write was a frame in the middle of an animation.
+        pub in_flight: Vec<bool>,
     }
 
     impl MockBackend {
@@ -2017,6 +2022,7 @@ pub(crate) mod tests {
         fn set_frame(&mut self, id: WinId, frame: Rect) {
             let (min_w, min_h) = self.min.get(&id).copied().unwrap_or((0, 0));
             self.writes.push(id);
+            self.in_flight.push(false);
             if let Some(w) = self.windows.iter_mut().find(|w| w.id == id) {
                 w.frame = Rect::new(frame.x, frame.y, frame.w.max(min_w), frame.h.max(min_h));
             }
@@ -2071,6 +2077,10 @@ pub(crate) mod tests {
         fn show_overlay(&mut self, overlay: Option<Overlay>) {
             self.overlay = overlay;
             self.overlay_changes += 1;
+        }
+        fn animate_frame(&mut self, id: WinId, frame: Rect, _prev: Rect) {
+            self.set_frame(id, frame);
+            *self.in_flight.last_mut().unwrap() = true;
         }
         fn focus(&mut self, id: WinId) {
             self.focus_calls.push(id);
@@ -4223,6 +4233,38 @@ pub(crate) mod tests {
                 assert_eq!(order.len(), 2, "{order:?}");
                 assert_eq!(order[0], shrink, "window {shrink} goes first: {order:?}");
             }
+        }
+    }
+    #[test]
+    fn an_animation_lands_with_a_final_write() {
+        let mut m = manager(12.0);
+        m.backend.open(1, "a");
+        m.refresh();
+        m.backend.open(2, "b");
+        m.refresh();
+        settle(&mut m);
+        m.backend.focused = Some(1);
+        m.refresh();
+        m.backend.writes.clear();
+        m.backend.in_flight.clear();
+        m.execute(&Command::Resize(Direction::Right, Some(0.2)))
+            .unwrap();
+        settle(&mut m);
+        let b = m.backend();
+        for id in [1, 2] {
+            let mine: Vec<bool> = b
+                .writes
+                .iter()
+                .zip(&b.in_flight)
+                .filter(|(w, _)| **w == id)
+                .map(|(_, f)| *f)
+                .collect();
+            assert!(mine.len() > 3, "window {id} animates: {mine:?}");
+            assert!(mine[..mine.len() - 1].iter().all(|f| *f), "{mine:?}");
+            assert!(
+                !mine.last().unwrap(),
+                "window {id} lands with a final write"
+            );
         }
     }
 }
