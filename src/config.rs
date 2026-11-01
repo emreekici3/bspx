@@ -25,7 +25,8 @@ pub struct Config {
     pub split_ratio: f32,
     /// Default amount for `resize` commands, as a fraction of the split.
     pub resize_step: f32,
-    /// How often to look for opened/closed windows, in milliseconds.
+    /// Kept so older configs still load: bspx no longer polls, it waits
+    /// for window, app, Space and display events instead.
     pub poll_interval_ms: u64,
     /// Apps (by name, e.g. "System Settings") whose windows are never tiled.
     pub float_apps: Vec<String>,

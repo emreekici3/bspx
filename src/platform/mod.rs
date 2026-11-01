@@ -93,8 +93,14 @@ pub trait Backend {
     /// Lets the platform UI (the overlay window) process its events. Called
     /// once per frame.
     fn pump(&mut self) {}
-    /// Window events delivered since the last call (after `pump`), so the
-    /// layout can react at once instead of at the next poll.
+    /// Whether the backend is still waiting for something it saw to settle
+    /// (a new window whose Accessibility element is not there yet, an app
+    /// still starting up) and wants another look soon, events or not.
+    fn wants_another_look(&mut self) -> bool {
+        false
+    }
+    /// Window events delivered since the last call (after `pump`): the only
+    /// way bspx learns that something changed.
     fn take_events(&mut self) -> Vec<WindowEvent> {
         Vec::new()
     }
@@ -175,8 +181,12 @@ pub enum WindowEvent {
     /// moment while macOS plays the close animation.
     Destroyed(WinId),
     /// Something that needs a fresh look at the window list: a window was
-    /// minimised or restored, or an app hidden or shown.
+    /// opened, minimised or restored, an app launched, quit, hidden, shown
+    /// or brought to the front, the Space or the displays changed.
     Changed,
+    /// The window was moved or resized: by the user, by its app, or by bspx
+    /// itself.
+    Moved(WinId),
 }
 
 /// The translucent highlight shown over a drop target while a window is dragged.

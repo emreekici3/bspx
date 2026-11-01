@@ -23,6 +23,8 @@ pub type AXObserverCallback =
     unsafe extern "C" fn(AXObserverRef, AXUIElementRef, CFStringRef, *mut c_void);
 pub type AXError = i32;
 pub const kAXErrorSuccess: AXError = 0;
+/// Adding a notification the observer already has.
+pub const kAXErrorNotificationAlreadyRegistered: AXError = -25209;
 
 pub type AXValueType = u32;
 pub const kAXValueTypeCGPoint: AXValueType = 1;
@@ -211,6 +213,10 @@ unsafe extern "C" {
     pub fn CGEventSourceButtonState(state_id: CGEventSourceStateID, button: CGMouseButton) -> bool;
     pub fn CGWarpMouseCursorPosition(point: CGPoint) -> i32;
     pub fn CGAssociateMouseAndMouseCursorPosition(connected: Boolean) -> i32;
+    pub fn CGDisplayRegisterReconfigurationCallback(
+        callback: CGDisplayReconfigurationCallBack,
+        user_info: *mut c_void,
+    ) -> i32;
 
     // Private SkyLight API, re-exported by CoreGraphics. Spaces have no
     // public API.
@@ -230,10 +236,18 @@ unsafe extern "C" {
 pub type Id = *mut c_void;
 pub type Sel = *mut c_void;
 
+/// Called with a display and what changed about it, before and after.
+pub type CGDisplayReconfigurationCallBack =
+    unsafe extern "C" fn(display: CGDirectDisplayID, flags: u32, user_info: *mut c_void);
+
 // Linking AppKit makes NSScreen, NSApplication and NSWindow available to
 // the Objective-C runtime; QuartzCore does the same for CATransaction.
 #[cfg_attr(target_os = "macos", link(name = "AppKit", kind = "framework"))]
-unsafe extern "C" {}
+unsafe extern "C" {
+    /// Readies Cocoa in a program that is not an `NSApplication` main loop,
+    /// so `NSWorkspace` notifications reach it through its run loop.
+    pub fn NSApplicationLoad() -> i8;
+}
 
 #[cfg_attr(target_os = "macos", link(name = "QuartzCore", kind = "framework"))]
 unsafe extern "C" {}
@@ -253,6 +267,14 @@ unsafe extern "C" {
     pub fn objc_msgSend_stret();
     pub fn objc_autoreleasePoolPush() -> *mut c_void;
     pub fn objc_autoreleasePoolPop(pool: *mut c_void);
+    pub fn objc_allocateClassPair(superclass: Id, name: *const c_char, extra: usize) -> Id;
+    pub fn objc_registerClassPair(class: Id);
+    pub fn class_addMethod(class: Id, name: Sel, imp: *const c_void, types: *const c_char) -> i8;
+}
+
+unsafe extern "C" {
+    /// Signal 0 only asks whether the process exists.
+    pub fn kill(pid: i32, signal: i32) -> i32;
 }
 
 /// `dlsym`'s pseudo-handle that searches every loaded image.

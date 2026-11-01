@@ -18,10 +18,12 @@ use crate::platform::Backend;
 const ACTIVE_FRAME: Duration = Duration::from_micros(8_333);
 /// Loop interval when nothing is moving.
 const IDLE_FRAME: Duration = Duration::from_millis(16);
-/// Polls wait while windows are moving, so a poll's window-server and
-/// Accessibility queries do not make an animation frame late; but never
-/// longer than this. Closed windows are handled by events in the meantime.
-const MAX_POLL_DELAY: Duration = Duration::from_millis(500);
+/// How often to look again while the backend waits for a new window or
+/// app to settle.
+const RETRY: Duration = Duration::from_millis(100);
+/// One more look this long after the last event: right after a Space switch
+/// or an app launch the window list can still show how things were.
+const FOLLOW_UP: Duration = Duration::from_millis(300);
 /// How long to hold off tiling at startup while the config script runs, so
 /// windows are laid out once with the user's settings instead of jumping
 /// from the defaults.
@@ -90,13 +92,18 @@ impl Drop for RcScript {
 }
 
 /// Runs until a `quit` command arrives or `stop` is set.
+///
+/// There is no polling: the window list is read again only when something
+/// says it changed (a window or app event, a command), once more shortly
+/// after the last event, when an animation ends (to see where the windows
+/// really went), and, briefly, while the backend waits for a new window or
+/// app to settle.
 pub fn run<B: Backend>(
     backend: B,
     rc_path: Option<PathBuf>,
     server: Server,
     stop: Arc<AtomicBool>,
 ) {
-    let poll_interval = |c: &Config| Duration::from_millis(c.poll_interval_ms.max(16));
     let mut manager = Manager::new(backend, Config::default());
 
     let mut rc = rc_path.as_deref().and_then(RcScript::spawn);
@@ -106,11 +113,15 @@ pub fn run<B: Backend>(
     let mut started = false;
 
     let mut last_frame = Instant::now();
-    let mut last_poll = Instant::now();
+    let mut last_look = Instant::now();
+    let mut was_animating = false;
+    let mut follow_up: Option<Instant> = None;
     while !stop.load(Ordering::Relaxed) {
         let frame_start = Instant::now();
         let mut reload = false;
+        let mut commands = false;
         let mut handle = |manager: &mut Manager<B>, line: &str| {
+            commands = true;
             let cmd = Command::parse(line)?;
             match cmd {
                 Command::Quit => {
@@ -143,19 +154,14 @@ pub fn run<B: Backend>(
         if !rc_running {
             rc = None;
         }
+        let mut look = false;
         if !started && !rc_running {
             started = true;
-            manager.refresh();
-            last_poll = Instant::now();
+            look = true;
         }
-
-        let since_poll = last_poll.elapsed();
-        let poll_due = since_poll >= poll_interval(manager.config())
-            && (!manager.is_animating() || since_poll >= MAX_POLL_DELAY);
-        if started && poll_due {
-            last_poll = Instant::now();
-            manager.refresh();
-        }
+        // A command may have changed a rule or a setting the layout must
+        // follow (what a poll used to pick up).
+        look |= commands;
 
         let now = Instant::now();
         let dt = now.duration_since(last_frame).as_secs_f64();
@@ -165,9 +171,26 @@ pub fn run<B: Backend>(
             manager.track_pointer();
         }
         manager.pump();
-        if manager.handle_events() && started {
+        if manager.handle_events() {
+            look = true;
+            follow_up = Some(Instant::now() + FOLLOW_UP);
+        }
+        if follow_up.is_some_and(|at| Instant::now() >= at) {
+            follow_up = None;
+            look = true;
+        }
+
+        // Where the windows really went, once they stop: apps that refused
+        // a size, a window that does not fit after all.
+        let animating = manager.is_animating();
+        look |= was_animating && !animating;
+        was_animating = animating;
+
+        look |= last_look.elapsed() >= RETRY && manager.wants_another_look();
+
+        if started && look {
+            last_look = Instant::now();
             manager.refresh();
-            last_poll = Instant::now();
         }
 
         // Sleep only what is left of the frame, so frames stay evenly spaced

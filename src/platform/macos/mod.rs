@@ -2,6 +2,7 @@
 //! Accessibility API to move, resize and focus them.
 
 mod desktop;
+mod events;
 mod ffi;
 mod hotkeys;
 mod overlay;
@@ -124,6 +125,11 @@ struct Names {
     deminiaturized: Cf,
     app_hidden: Cf,
     app_shown: Cf,
+    window_created: Cf,
+    focused_window_changed: Cf,
+    app_activated: Cf,
+    window_moved: Cf,
+    window_resized: Cf,
 }
 
 impl Names {
@@ -146,6 +152,11 @@ impl Names {
             deminiaturized: cfstring("AXWindowDeminiaturized"),
             app_hidden: cfstring("AXApplicationHidden"),
             app_shown: cfstring("AXApplicationShown"),
+            window_created: cfstring("AXWindowCreated"),
+            focused_window_changed: cfstring("AXFocusedWindowChanged"),
+            app_activated: cfstring("AXApplicationActivated"),
+            window_moved: cfstring("AXWindowMoved"),
+            window_resized: cfstring("AXWindowResized"),
         }
     }
 }
@@ -715,9 +726,11 @@ thread_local! {
     static EVENTS: std::cell::RefCell<Vec<WindowEvent>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// `refcon` tags: a window's destruction carries its id; anything else
-/// (minimise, restore, hide, show) only asks for a fresh look.
+/// `refcon` tags: a window's destruction carries its id; a move or resize
+/// carries `MOVED_TAG` and the id; anything else (a window opened, focus,
+/// minimise, restore, hide, show) only asks for a fresh look.
 const CHANGED_TAG: usize = 1 << 40;
+const MOVED_TAG: usize = 1 << 41;
 
 unsafe extern "C" fn ax_callback(
     _observer: AXObserverRef,
@@ -728,6 +741,8 @@ unsafe extern "C" fn ax_callback(
     let tag = refcon as usize;
     let event = if tag & CHANGED_TAG != 0 {
         WindowEvent::Changed
+    } else if tag & MOVED_TAG != 0 {
+        WindowEvent::Moved((tag & !MOVED_TAG) as WinId)
     } else {
         WindowEvent::Destroyed(tag as WinId)
     };
@@ -738,6 +753,10 @@ unsafe extern "C" fn ax_callback(
 struct AppHandle {
     element: Cf,
     observer: Option<Cf>,
+    /// Every app-wide notification is registered. An app still starting up
+    /// may refuse them; they are tried again for a while.
+    watching: bool,
+    tries: u8,
 }
 
 impl Drop for AppHandle {
@@ -753,15 +772,43 @@ impl Drop for AppHandle {
     }
 }
 
-fn observe(observer: &Cf, element: AXUIElementRef, notification: &Cf, refcon: usize) {
-    unsafe {
+/// Registers a notification. Returns whether it is (now or already) on.
+fn observe(observer: &Cf, element: AXUIElementRef, notification: &Cf, refcon: usize) -> bool {
+    let err = unsafe {
         AXObserverAddNotification(
             observer.ptr(),
             element,
             notification.ptr(),
             refcon as *mut c_void,
-        );
+        )
+    };
+    err == kAXErrorSuccess || err == kAXErrorNotificationAlreadyRegistered
+}
+
+/// The app-wide notifications: a window opened, the focus moved, the app
+/// came to the front, was hidden or shown. Returns whether all are on.
+fn watch_app(observer: &Cf, app: AXUIElementRef, names: &Names) -> bool {
+    // Every one is tried, even after one fails.
+    let mut all = true;
+    for name in [
+        &names.window_created,
+        &names.focused_window_changed,
+        &names.app_activated,
+        &names.app_hidden,
+        &names.app_shown,
+    ] {
+        all &= observe(observer, app, name, CHANGED_TAG);
     }
+    all
+}
+
+/// How many times to try watching an app that refuses (one still starting
+/// up), a tenth of a second apart.
+const MAX_WATCH_TRIES: u8 = 30;
+
+/// Whether the process is still running.
+fn process_alive(pid: i32) -> bool {
+    unsafe { kill(pid, 0) == 0 }
 }
 
 struct TrackedWindow {
@@ -805,6 +852,7 @@ impl MacBackend {
     pub fn new() -> Self {
         let system =
             Cf::owned(unsafe { AXUIElementCreateSystemWide() }).expect("system-wide AX element");
+        events::start();
         unsafe { AXUIElementSetMessagingTimeout(system.ptr(), 0.25) };
         Self {
             names: Names::new(),
@@ -839,19 +887,58 @@ impl MacBackend {
                 });
             }
             let observer = Self::create_observer(pid);
-            if let Some(obs) = &observer {
-                observe(obs, app.ptr(), &self.names.app_hidden, CHANGED_TAG);
-                observe(obs, app.ptr(), &self.names.app_shown, CHANGED_TAG);
+            let watching = observer
+                .as_ref()
+                .is_some_and(|obs| watch_app(obs, app.ptr(), &self.names));
+            if !watching {
+                debug!("pid {pid} is not ready to be watched yet");
             }
             self.apps.insert(
                 pid,
                 AppHandle {
                     element: app,
                     observer,
+                    watching,
+                    tries: 1,
                 },
             );
         }
         self.apps.get(&pid).map(|a| a.element.ptr())
+    }
+
+    /// Watches every regular app that is running, so a window one of them
+    /// opens later is reported even if it has none now.
+    fn watch_running_apps(&mut self) {
+        let me = std::process::id() as i32;
+        for pid in events::running_app_pids() {
+            if pid != me {
+                self.app(pid);
+            }
+        }
+    }
+
+    /// Tries again to watch apps that refused while starting up.
+    fn retry_watching(&mut self) {
+        for (pid, handle) in &mut self.apps {
+            if handle.watching || handle.tries >= MAX_WATCH_TRIES {
+                continue;
+            }
+            handle.tries += 1;
+            if handle.observer.is_none() {
+                handle.observer = Self::create_observer(*pid);
+            }
+            handle.watching = handle
+                .observer
+                .as_ref()
+                .is_some_and(|obs| watch_app(obs, handle.element.ptr(), &self.names));
+            if handle.watching {
+                debug!("watching pid {pid} after {} tries", handle.tries);
+            } else if handle.tries == MAX_WATCH_TRIES {
+                warn!(
+                    "pid {pid} cannot be watched: its new windows are seen only when something else changes"
+                );
+            }
+        }
     }
 
     /// An observer for `pid`, attached to this thread's run loop.
@@ -899,6 +986,9 @@ impl MacBackend {
                     observe(obs, element.ptr(), &self.names.destroyed, id as usize);
                     observe(obs, element.ptr(), &self.names.miniaturized, CHANGED_TAG);
                     observe(obs, element.ptr(), &self.names.deminiaturized, CHANGED_TAG);
+                    let moved = MOVED_TAG | id as usize;
+                    observe(obs, element.ptr(), &self.names.window_moved, moved);
+                    observe(obs, element.ptr(), &self.names.window_resized, moved);
                 }
                 self.windows.insert(
                     id,
@@ -1061,8 +1151,13 @@ impl Backend for MacBackend {
         let alive = &self.alive;
         self.windows.retain(|id, _| alive.contains(id));
         self.lookups.retain(|id, _| present.contains(id));
-        let live_pids: HashSet<i32> = all.iter().chain(&cg).map(|w| w.pid).collect();
-        self.apps.retain(|pid, _| live_pids.contains(pid));
+        // An app is watched for as long as it runs, windows or not: with no
+        // polling, a window it opens later is only seen through its observer.
+        self.apps.retain(|pid, _| process_alive(*pid));
+        if events::take_rescan() {
+            self.watch_running_apps();
+        }
+        self.retry_watching();
 
         // Ask each app with unknown windows for its AX windows, once per poll.
         let mut unknown: HashMap<i32, HashSet<WinId>> = HashMap::new();
@@ -1322,8 +1417,24 @@ impl Backend for MacBackend {
         }
     }
 
+    fn wants_another_look(&mut self) -> bool {
+        // A new window whose AX element has not turned up yet, or an app
+        // that is still starting up: both settle within a second or two.
+        // (A window found after a few tries keeps its count: skip those.)
+        self.lookups
+            .iter()
+            .any(|(id, n)| *n < MAX_LOOKUPS && !self.windows.contains_key(id))
+            || self
+                .apps
+                .values()
+                .any(|a| !a.watching && a.tries < MAX_WATCH_TRIES)
+    }
+
     fn take_events(&mut self) -> Vec<WindowEvent> {
-        let events = EVENTS.with(|e| std::mem::take(&mut *e.borrow_mut()));
+        let mut events = EVENTS.with(|e| std::mem::take(&mut *e.borrow_mut()));
+        if events::take_changed() {
+            events.push(WindowEvent::Changed);
+        }
         for event in &events {
             if let WindowEvent::Destroyed(id) = event {
                 // Its AX element is dead; never tile it again.

@@ -217,6 +217,12 @@ impl<B: Backend> Manager<B> {
         self.backend.hotkey_commands()
     }
 
+    /// Whether the backend wants another look soon without an event: see
+    /// [`Backend::wants_another_look`].
+    pub fn wants_another_look(&mut self) -> bool {
+        self.backend.wants_another_look()
+    }
+
     pub fn tree(&self) -> &BspTree {
         &self.tree
     }
@@ -822,10 +828,10 @@ impl<B: Backend> Manager<B> {
         true
     }
 
-    /// Reacts to window events right away. A closed window leaves the layout
-    /// at once, so its neighbours fill the gap without waiting for the next
-    /// poll (animated, or instantly with `animation 0`). Returns whether the
-    /// window list should be read again now.
+    /// Reacts to window events, the only way bspx learns that something
+    /// changed. A closed window leaves the layout at once, so its neighbours
+    /// fill the gap (animated, or instantly with `animation 0`). Returns
+    /// whether the window list should be read again now.
     pub fn handle_events(&mut self) -> bool {
         let mut refresh = false;
         let mut dirty = false;
@@ -848,6 +854,12 @@ impl<B: Backend> Manager<B> {
                     }
                 }
                 WindowEvent::Changed => refresh = true,
+                // While bspx animates, the moves are mostly its own: one
+                // look once the animation ends covers them. While the mouse
+                // is down, the user is dragging: the release takes a look.
+                WindowEvent::Moved(_) => {
+                    refresh |= self.anim.is_idle() && !self.backend.mouse_down();
+                }
             }
         }
         if dirty {
@@ -4266,5 +4278,30 @@ pub(crate) mod tests {
                 "window {id} lands with a final write"
             );
         }
+    }
+    #[test]
+    fn a_move_asks_for_a_look_only_when_bspx_is_not_the_one_moving() {
+        let mut m = manager(12.0);
+        m.backend.open(1, "a");
+        m.refresh();
+        settle(&mut m);
+        // Idle: the user or the app moved the window.
+        m.backend.events.push(WindowEvent::Moved(1));
+        assert!(m.handle_events(), "an outside move is looked at");
+        // Animating: bspx's own frames; the end of the animation looks.
+        m.backend.open(2, "b");
+        m.refresh();
+        assert!(m.is_animating());
+        m.backend.events.push(WindowEvent::Moved(1));
+        assert!(!m.handle_events(), "bspx's own moves are not");
+        settle(&mut m);
+        // The mouse is down: the user is dragging; the release looks.
+        m.backend.mouse = true;
+        m.backend.events.push(WindowEvent::Moved(1));
+        assert!(!m.handle_events(), "a drag is not, until the release");
+        m.backend.mouse = false;
+        // Anything else always is.
+        m.backend.events.push(WindowEvent::Changed);
+        assert!(m.handle_events());
     }
 }
