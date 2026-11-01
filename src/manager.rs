@@ -288,10 +288,13 @@ impl<B: Backend> Manager<B> {
             .collect();
         ids.extend(extra);
         let spaces = self.backend.window_spaces(&ids);
-        let switching = windows
-            .iter()
-            .any(|w| spaces.get(&w.id).is_some_and(|s| *s != space))
-            || (!self.tree.is_empty()
+        // Right after a Space switch the screen still shows windows bspx
+        // tiles on another Space. Only those count: a window on every Space
+        // or on another display is always on screen and says nothing.
+        let switching =
+            self.all_tiled().iter().any(|(_, id)| {
+                on_screen.contains(id) && spaces.get(id).is_some_and(|s| *s != space)
+            }) || (!self.tree.is_empty()
                 && !self.tree.windows().iter().any(|w| on_screen.contains(w)));
 
         // Floating Spaces have no layout; their windows stay where they are.
@@ -320,6 +323,10 @@ impl<B: Backend> Manager<B> {
                     }
                     Some(_) if tree_space == space && !on_screen.contains(&id) && !switching => {
                         Some("minimised or hidden")
+                    }
+                    Some(_) if tree_space == space && !on_screen.contains(&id) => {
+                        debug!("window {id} is off screen; kept while a Space switch settles");
+                        None
                     }
                     Some(_) => None,
                 }
@@ -1616,6 +1623,10 @@ pub(crate) mod tests {
         pub writes: Vec<WinId>,
         /// Whether each write was a frame in the middle of an animation.
         pub in_flight: Vec<bool>,
+        /// Windows shown on every Space, as "Assign to: All Desktops".
+        pub sticky: HashSet<WinId>,
+        /// Windows fading out as they close: still listed, not on screen.
+        pub fading: HashSet<WinId>,
     }
 
     impl MockBackend {
@@ -1643,7 +1654,11 @@ pub(crate) mod tests {
             let shown = self.screen_space.unwrap_or(self.active);
             self.windows
                 .iter()
-                .filter(|w| self.space_of.get(&w.id).copied().unwrap_or(0) == shown)
+                .filter(|w| {
+                    self.space_of.get(&w.id).copied().unwrap_or(0) == shown
+                        || self.sticky.contains(&w.id)
+                })
+                .filter(|w| !self.fading.contains(&w.id))
                 .filter(|w| !self.minimised.contains(&w.id))
                 .cloned()
                 .collect()
@@ -3706,5 +3721,25 @@ pub(crate) mod tests {
         m.execute(&Command::Resize(Direction::Left, Some(0.05)))
             .unwrap();
         assert!(m.slots()[0].1.w < last, "one press back moves it back");
+    }
+    #[test]
+    fn a_closing_window_leaves_at_once_beside_a_window_on_every_space() {
+        let mut m = three_spaces();
+        m.backend.open(1, "Terminal");
+        m.refresh();
+        m.backend.open(2, "Terminal");
+        m.refresh();
+        // A floating window on every Space, listed as on another one.
+        m.backend.open(9, "Notes");
+        m.backend.space_of.insert(9, 20);
+        m.backend.sticky.insert(9);
+        m.execute(&Command::parse("rule float Notes").unwrap())
+            .unwrap();
+        m.refresh();
+        assert_eq!(m.tree().windows(), vec![1, 2]);
+        // Window 2 closes: gone from the screen, still listed while it fades.
+        m.backend.fading.insert(2);
+        m.refresh();
+        assert_eq!(m.tree().windows(), vec![1], "no wait for the fade");
     }
 }

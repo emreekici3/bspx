@@ -218,6 +218,11 @@ struct CgWindow {
     frame: Rect,
 }
 
+/// Below this opacity a window counts as gone: it is fading out as it
+/// closes. Windows are opaque otherwise; a window's own see-through
+/// background (a terminal's) does not change this.
+const VISIBLE_ALPHA: f64 = 0.5;
+
 /// Normal application windows, other than bspx's own. `on_screen_only`
 /// limits them to the active Space; otherwise windows on every Space,
 /// minimised and hidden ones included, are listed.
@@ -253,6 +258,12 @@ fn cg_windows(on_screen_only: bool) -> Vec<CgWindow> {
             };
             if pid == own_pid {
                 continue; // the drag highlight
+            }
+            // A closing window fades out, and stays listed until it is
+            // fully transparent: about a third of a second, though it is
+            // out of sight after the first tenth.
+            if on_screen_only && f64_value(get(kCGWindowAlpha)).is_some_and(|a| a < VISIBLE_ALPHA) {
+                continue;
             }
             let mut bounds = CGRect::default();
             let bounds_dict = get(kCGWindowBounds);
@@ -811,6 +822,13 @@ fn process_alive(pid: i32) -> bool {
     unsafe { kill(pid, 0) == 0 }
 }
 
+/// One Accessibility write of a window's frame.
+#[derive(Clone, Copy)]
+enum Step {
+    Position,
+    Size,
+}
+
 struct TrackedWindow {
     element: Cf,
     pid: i32,
@@ -1021,14 +1039,12 @@ impl MacBackend {
 }
 
 impl MacBackend {
-    fn write_frame(
-        &mut self,
-        id: WinId,
-        frame: Rect,
-        moved: bool,
-        resized: bool,
-        size_first: bool,
-    ) {
+    /// Writes `frame` to window `id` in the order of `steps`: one AX call
+    /// each, so the window spends a moment at every step in between.
+    fn write_frame(&mut self, id: WinId, frame: Rect, steps: &[Step]) {
+        if steps.is_empty() {
+            return;
+        }
         let Some(win) = self.windows.get(&id) else {
             return;
         };
@@ -1041,54 +1057,28 @@ impl MacBackend {
             width: f64::from(frame.w),
             height: f64::from(frame.h),
         };
-        let set_position = || unsafe {
-            if let Some(v) = Cf::owned(AXValueCreate(
-                kAXValueTypeCGPoint,
-                (&raw const point).cast(),
-            )) {
-                set_attr(element, &self.names.position, v.ptr());
-            }
-        };
-        let set_size = || unsafe {
-            if let Some(v) = Cf::owned(AXValueCreate(kAXValueTypeCGSize, (&raw const size).cast()))
-            {
-                set_attr(element, &self.names.size, v.ptr());
+        let write = |step: Step| unsafe {
+            let value = match step {
+                Step::Position => AXValueCreate(kAXValueTypeCGPoint, (&raw const point).cast()),
+                Step::Size => AXValueCreate(kAXValueTypeCGSize, (&raw const size).cast()),
+            };
+            if let Some(v) = Cf::owned(value) {
+                let name = match step {
+                    Step::Position => &self.names.position,
+                    Step::Size => &self.names.size,
+                };
+                set_attr(element, name, v.ptr());
             }
         };
         // `bspx config log_level debug` traces every write: where the window
-        // was asked to go, and where the app put it after each call.
+        // was asked to go, and where the app put it after the first call and
+        // at the end.
         let trace = log::log_enabled!(target: "bspx::frames", log::Level::Debug);
-        let read = || trace.then(|| self.ax_frame(element)).flatten();
-        let (first, second): (&dyn Fn(), &dyn Fn()) = if size_first {
-            (
-                &|| {
-                    if resized {
-                        set_size()
-                    }
-                },
-                &|| {
-                    if moved {
-                        set_position()
-                    }
-                },
-            )
-        } else {
-            (
-                &|| {
-                    if moved {
-                        set_position()
-                    }
-                },
-                &|| {
-                    if resized {
-                        set_size()
-                    }
-                },
-            )
-        };
-        first();
-        let mid = read();
-        second();
+        write(steps[0]);
+        let mid = trace.then(|| self.ax_frame(element)).flatten();
+        for &step in &steps[1..] {
+            write(step);
+        }
         if trace {
             let edges = |r: Option<Rect>| {
                 r.map_or_else(
@@ -1096,14 +1086,37 @@ impl MacBackend {
                     |r| format!("{}..{} w{}", r.x, r.max_x(), r.w),
                 )
             };
+            let order: Vec<&str> = steps
+                .iter()
+                .map(|s| match s {
+                    Step::Position => "pos",
+                    Step::Size => "size",
+                })
+                .collect();
             log::debug!(
                 target: "bspx::frames",
                 "window {id} {}: want {} | between {} | after {}",
-                if size_first { "size,pos" } else { "pos,size" },
+                order.join(","),
                 edges(Some(frame)),
                 edges(mid),
-                edges(read()),
+                edges(self.ax_frame(element)),
             );
+        }
+    }
+
+    /// The writes that put a window at its final frame. As in yabai: macOS
+    /// cuts a resize short where it would take the window past the screen
+    /// edge, so when both change the size is set before the move (to fit
+    /// where the window is going) and again after it (in case the old
+    /// place cut it short).
+    fn settle_steps(frame: Rect, prev: Rect) -> Vec<Step> {
+        let moved = (frame.x, frame.y) != (prev.x, prev.y);
+        let resized = (frame.w, frame.h) != (prev.w, prev.h);
+        match (moved, resized) {
+            (true, true) => vec![Step::Size, Step::Position, Step::Size],
+            (true, false) => vec![Step::Position],
+            (false, true) => vec![Step::Size],
+            (false, false) => Vec::new(),
         }
     }
 
@@ -1226,23 +1239,29 @@ impl Backend for MacBackend {
     }
 
     fn set_frame(&mut self, id: WinId, frame: Rect) {
-        self.write_frame(id, frame, true, true, false);
+        self.write_frame(id, frame, &[Step::Size, Step::Position, Step::Size]);
     }
 
     fn animate_frame(&mut self, id: WinId, frame: Rect, prev: Rect) {
         let moved = (frame.x, frame.y) != (prev.x, prev.y);
         let resized = (frame.w, frame.h) != (prev.w, prev.h);
-        let size_first = !crate::platform::position_first(frame, prev, self.display);
-        self.write_frame(id, frame, moved, resized, size_first);
+        let order = if crate::platform::position_first(frame, prev, self.display) {
+            [Step::Position, Step::Size]
+        } else {
+            [Step::Size, Step::Position]
+        };
+        let steps: Vec<Step> = order
+            .into_iter()
+            .filter(|s| match s {
+                Step::Position => moved,
+                Step::Size => resized,
+            })
+            .collect();
+        self.write_frame(id, frame, &steps);
     }
 
     fn update_frame(&mut self, id: WinId, frame: Rect, prev: Rect) {
-        let moved = (frame.x, frame.y) != (prev.x, prev.y);
-        let resized = (frame.w, frame.h) != (prev.w, prev.h);
-        // Growing: move first, so the larger window is not pushed back by the
-        // screen edge. Shrinking: resize first, for the same reason.
-        let grows = frame.w > prev.w || frame.h > prev.h;
-        self.write_frame(id, frame, moved, resized, !grows);
+        self.write_frame(id, frame, &Self::settle_steps(frame, prev));
     }
 
     fn active_space(&mut self) -> u64 {
