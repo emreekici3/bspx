@@ -5,14 +5,9 @@
 //! A new window always splits an existing leaf along that leaf's longer side,
 //! so the screen is carved up into a binary tree of panes.
 
-use std::collections::HashMap;
-
 use crate::geometry::{Direction, Rect};
 
 pub type WinId = u32;
-
-/// The smallest width and height each window accepts, where known.
-pub type MinSizes = HashMap<WinId, (i32, i32)>;
 
 const MIN_RATIO: f32 = 0.05;
 const MAX_RATIO: f32 = 0.95;
@@ -58,52 +53,6 @@ impl Node {
             Node::Leaf(_) => 1,
             Node::Split { a, b, .. } => a.leaf_count() + b.leaf_count(),
         }
-    }
-
-    /// The smallest area this subtree fits in: its windows' minimum sizes
-    /// side by side or stacked, with the gaps between them. Every window
-    /// takes at least a point, as [`split_area`](Self::split_area) gives it.
-    fn min_size(&self, mins: &MinSizes, gap: i32) -> (i32, i32) {
-        match self {
-            Node::Leaf(w) => {
-                let (w, h) = mins.get(w).copied().unwrap_or((0, 0));
-                (w.max(1), h.max(1))
-            }
-            Node::Split { split, a, b, .. } => {
-                let (aw, ah) = a.min_size(mins, gap);
-                let (bw, bh) = b.min_size(mins, gap);
-                match split {
-                    Split::Columns => (aw + gap + bw, ah.max(bh)),
-                    Split::Rows => (aw.max(bw), ah + gap + bh),
-                }
-            }
-        }
-    }
-
-    /// Splits `area` between `a` and `b`, giving each at least its minimum
-    /// size when the area allows. Returns the two areas and the share `a`
-    /// really got, which differs from `ratio` when a minimum size won.
-    fn split_area(&self, area: Rect, gap: i32, mins: &MinSizes) -> Option<(Rect, Rect, f32)> {
-        let Node::Split { split, ratio, a, b } = self else {
-            return None;
-        };
-        let (amin, bmin) = (a.min_size(mins, gap), b.min_size(mins, gap));
-        let (amin, bmin, len) = match split {
-            Split::Columns => (amin.0, bmin.0, area.w),
-            Split::Rows => (amin.1, bmin.1, area.h),
-        };
-        let avail = (len - gap).max(2);
-        let mut share = ((avail as f32) * ratio).round() as i32;
-        if amin + bmin <= avail {
-            let hi = (avail - bmin).min(avail - 1);
-            share = share.clamp(amin.max(1).min(hi), hi);
-        } else if amin + bmin > 0 {
-            // Both cannot fit: share the shortfall in proportion.
-            share = ((avail as f32) * amin as f32 / (amin + bmin) as f32).round() as i32;
-        }
-        let share = share.clamp(1, avail - 1);
-        let (ra, rb) = split_rect(area, *split, share as f32 / avail as f32, gap);
-        Some((ra, rb, share as f32 / avail as f32))
     }
 
     fn collect(&self, out: &mut Vec<WinId>) {
@@ -195,58 +144,25 @@ impl BspTree {
         out
     }
 
-    /// Computes the frame of every window inside `area`.
+    /// Computes the frame of every window inside `area`: each split gives
+    /// its first half its ratio of the room, whatever the windows in it
+    /// would rather have.
     pub fn layout(&self, area: Rect, gap: i32) -> Vec<(WinId, Rect)> {
-        self.layout_with(area, gap, &MinSizes::new())
-    }
-
-    /// Like [`layout`](Self::layout), but no window is made smaller than
-    /// its entry in `mins` while the area has room for it.
-    pub fn layout_with(&self, area: Rect, gap: i32, mins: &MinSizes) -> Vec<(WinId, Rect)> {
-        fn rec(node: &Node, area: Rect, gap: i32, mins: &MinSizes, out: &mut Vec<(WinId, Rect)>) {
+        fn rec(node: &Node, area: Rect, gap: i32, out: &mut Vec<(WinId, Rect)>) {
             match node {
                 Node::Leaf(w) => out.push((*w, area)),
-                Node::Split { a, b, .. } => {
-                    let (ra, rb, _) = node.split_area(area, gap, mins).expect("a split");
-                    rec(a, ra, gap, mins, out);
-                    rec(b, rb, gap, mins, out);
+                Node::Split { split, ratio, a, b } => {
+                    let (ra, rb) = split_rect(area, *split, *ratio, gap);
+                    rec(a, ra, gap, out);
+                    rec(b, rb, gap, out);
                 }
             }
         }
-        let mut out = Vec::with_capacity(self.len());
+        let mut out = Vec::new();
         if let Some(root) = &self.root {
-            rec(root, area, gap, mins, &mut out);
+            rec(root, area, gap, &mut out);
         }
         out
-    }
-
-    /// Whether every window fits in `area` at no less than its entry in
-    /// `mins`. If so, [`layout_with`](Self::layout_with) gives each one at
-    /// least that.
-    pub fn fits(&self, area: Rect, gap: i32, mins: &MinSizes) -> bool {
-        self.root.as_ref().is_none_or(|root| {
-            let (w, h) = root.min_size(mins, gap);
-            w <= area.w && h <= area.h
-        })
-    }
-
-    /// Sets every split's ratio to the share it really gets with `mins`,
-    /// so a ratio never hides past what a minimum size allows (otherwise
-    /// growing a window back would take several presses before it moved).
-    pub fn settle_ratios(&mut self, area: Rect, gap: i32, mins: &MinSizes) {
-        fn rec(node: &mut Node, area: Rect, gap: i32, mins: &MinSizes) {
-            let Some((ra, rb, real)) = node.split_area(area, gap, mins) else {
-                return;
-            };
-            if let Node::Split { ratio, a, b, .. } = node {
-                *ratio = real.clamp(MIN_RATIO, MAX_RATIO);
-                rec(a, ra, gap, mins);
-                rec(b, rb, gap, mins);
-            }
-        }
-        if let Some(root) = &mut self.root {
-            rec(root, area, gap, mins);
-        }
     }
 
     /// Inserts `new` by splitting the leaf of `target` (or the last window
@@ -502,16 +418,16 @@ impl BspTree {
 
     /// The area of the split that directly contains `win`: what the window
     /// and its sibling share. `None` for a lone window or an unknown one.
-    pub fn parent_rect(&self, win: WinId, area: Rect, gap: i32, mins: &MinSizes) -> Option<Rect> {
+    pub fn parent_rect(&self, win: WinId, area: Rect, gap: i32) -> Option<Rect> {
         let path = self.path(win)?;
         let (_, parent) = path.split_last()?;
         let mut node = self.root.as_ref()?;
         let mut rect = area;
         for side in parent {
-            let (ra, rb, _) = node.split_area(rect, gap, mins)?;
-            let Node::Split { a, b, .. } = node else {
+            let Node::Split { split, ratio, a, b } = node else {
                 return None;
             };
+            let (ra, rb) = split_rect(rect, *split, *ratio, gap);
             (node, rect) = if *side == Side::A { (a, ra) } else { (b, rb) };
         }
         Some(rect)
@@ -670,33 +586,6 @@ pub fn neighbor(layout: &[(WinId, Rect)], from: WinId, dir: Direction) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_minimum_size_that_takes_all_the_room_does_not_panic() {
-        let area = Rect::new(0, 0, 310, 100);
-        let mut t = BspTree::new();
-        t.insert(1, None, area, 10, 0.5);
-        t.insert(2, Some(1), area, 10, 0.5);
-        let mins: MinSizes = [(1, (300, 0))].into();
-        let layout = t.layout_with(area, 10, &mins);
-        assert_eq!(layout[0].1.w, 299);
-        assert_eq!(layout[1].1.w, 1);
-    }
-
-    #[test]
-    fn fits_counts_minimum_sizes_and_gaps() {
-        let area = Rect::new(0, 0, 1000, 600);
-        let mut t = BspTree::new();
-        assert!(t.fits(area, 10, &MinSizes::new()));
-        t.insert(1, None, area, 10, 0.5);
-        t.insert(2, Some(1), area, 10, 0.5);
-        let mins: MinSizes = [(1, (495, 600)), (2, (495, 600))].into();
-        assert!(t.fits(area, 10, &mins));
-        let mins: MinSizes = [(1, (496, 100)), (2, (495, 100))].into();
-        assert!(!t.fits(area, 10, &mins));
-        let mins: MinSizes = [(1, (100, 601))].into();
-        assert!(!t.fits(area, 10, &mins));
-    }
 
     const AREA: Rect = Rect::new(0, 0, 1000, 600);
     const GAP: i32 = 10;
@@ -890,54 +779,14 @@ mod tests {
     #[test]
     fn parent_rect_is_the_shared_area() {
         let t = tree(&[1, 2, 3]);
-        assert_eq!(t.parent_rect(1, AREA, GAP, &MinSizes::new()), Some(AREA));
+        assert_eq!(t.parent_rect(1, AREA, GAP), Some(AREA));
         // 2 and 3 share the right column.
         assert_eq!(
-            t.parent_rect(3, AREA, GAP, &MinSizes::new()),
+            t.parent_rect(3, AREA, GAP),
             Some(Rect::new(505, 0, 495, 600))
         );
-        assert_eq!(t.parent_rect(9, AREA, GAP, &MinSizes::new()), None);
-        assert_eq!(tree(&[1]).parent_rect(1, AREA, GAP, &MinSizes::new()), None);
-    }
-
-    #[test]
-    fn minimum_sizes_are_kept() {
-        let mut t = tree(&[1, 2, 3]);
-        let mins = MinSizes::from([(1, (600, 0)), (3, (0, 400))]);
-        let l = t.layout_with(AREA, GAP, &mins);
-        let f = |w: WinId| l.iter().find(|(x, _)| *x == w).unwrap().1;
-        assert_eq!(f(1).w, 600);
-        assert_eq!(f(2).x, 610);
-        assert_eq!(f(3).h, 400);
-        assert_eq!(f(2).h, 190);
-        // Without minimums nothing changes.
-        assert_eq!(
-            t.layout_with(AREA, GAP, &MinSizes::new()),
-            t.layout(AREA, GAP)
-        );
-
-        // Settling moves the ratios to what the minimums allow.
-        t.settle_ratios(AREA, GAP, &mins);
-        assert_eq!(t.layout(AREA, GAP), l);
-    }
-
-    #[test]
-    fn minimum_sizes_add_up_through_the_tree() {
-        // 1 | (2 / 3): the right column is as wide as its widest window.
-        let t = tree(&[1, 2, 3]);
-        let mins = MinSizes::from([(3, (700, 0))]);
-        let l = t.layout_with(AREA, GAP, &mins);
-        assert_eq!(l[0].1.w, 1000 - GAP - 700);
-        assert_eq!(l[1].1.w, 700);
-    }
-
-    #[test]
-    fn impossible_minimums_share_the_space() {
-        let t = tree(&[1, 2]);
-        let mins = MinSizes::from([(1, (900, 0)), (2, (900, 0))]);
-        let l = t.layout_with(AREA, GAP, &mins);
-        assert_eq!(l[0].1.w, 495);
-        assert_eq!(l[1].1.w, 495);
+        assert_eq!(t.parent_rect(9, AREA, GAP), None);
+        assert_eq!(tree(&[1]).parent_rect(1, AREA, GAP), None);
     }
 
     #[test]
