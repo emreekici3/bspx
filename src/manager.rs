@@ -537,7 +537,10 @@ impl<B: Backend> Manager<B> {
                         self.set_overlay(None);
                     }
                 }
-                WindowEvent::Changed => refresh = true,
+                WindowEvent::Changed => {
+                    debug!("event: something changed");
+                    refresh = true;
+                }
                 // While bspx animates, the moves are mostly its own: one
                 // look once the animation ends covers them. While the mouse
                 // is down, the user is dragging: the release takes a look.

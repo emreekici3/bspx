@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 
 use crate::command::Command;
 use crate::config::Config;
@@ -18,12 +18,19 @@ use crate::platform::Backend;
 const ACTIVE_FRAME: Duration = Duration::from_micros(8_333);
 /// Loop interval when nothing is moving.
 const IDLE_FRAME: Duration = Duration::from_millis(16);
+/// Work that takes longer than this is logged (at debug level), to find
+/// what keeps the layout waiting.
+const SLOW: Duration = Duration::from_millis(40);
+
 /// How often to look again while the backend waits for a new window or
 /// app to settle.
 const RETRY: Duration = Duration::from_millis(100);
-/// One more look this long after the last event: right after a Space switch
-/// or an app launch the window list can still show how things were.
-const FOLLOW_UP: Duration = Duration::from_millis(300);
+/// For this long after the last event, look again every `RETRY`. Right
+/// after an event the window list can still show how things were: a closed
+/// window stays listed while it fades out (and some apps, Terminal among
+/// them, report the close a second or more later), the old Space shows for
+/// a moment after a switch, a new app's windows come up a little later.
+const SETTLE: Duration = Duration::from_secs(1);
 /// How long to hold off tiling at startup while the config script runs, so
 /// windows are laid out once with the user's settings instead of jumping
 /// from the defaults.
@@ -94,10 +101,10 @@ impl Drop for RcScript {
 /// Runs until a `quit` command arrives or `stop` is set.
 ///
 /// There is no polling: the window list is read again only when something
-/// says it changed (a window or app event, a command), once more shortly
-/// after the last event, when an animation ends (to see where the windows
-/// really went), and, briefly, while the backend waits for a new window or
-/// app to settle.
+/// says it changed (a window or app event, a command), every tenth of a
+/// second for a second after the last event, when an animation ends (to see
+/// where the windows really went), and, briefly, while the backend waits
+/// for a new window or app to settle. Left alone, bspx does not look at all.
 pub fn run<B: Backend>(
     backend: B,
     rc_path: Option<PathBuf>,
@@ -115,7 +122,8 @@ pub fn run<B: Backend>(
     let mut last_frame = Instant::now();
     let mut last_look = Instant::now();
     let mut was_animating = false;
-    let mut follow_up: Option<Instant> = None;
+    // Until when to keep looking after the last event.
+    let mut settle_until: Option<Instant> = None;
     while !stop.load(Ordering::Relaxed) {
         let frame_start = Instant::now();
         let mut reload = false;
@@ -167,18 +175,22 @@ pub fn run<B: Backend>(
         let dt = now.duration_since(last_frame).as_secs_f64();
         last_frame = now;
         manager.tick(dt);
+        let took = now.elapsed();
+        if took > SLOW {
+            debug!("slow animation frame: {} ms", took.as_millis());
+        }
         if started {
             manager.track_pointer();
         }
         manager.pump();
         if manager.handle_events() {
             look = true;
-            follow_up = Some(Instant::now() + FOLLOW_UP);
+            settle_until = Some(Instant::now() + SETTLE);
         }
-        if follow_up.is_some_and(|at| Instant::now() >= at) {
-            follow_up = None;
-            look = true;
+        if settle_until.is_some_and(|until| Instant::now() >= until) {
+            settle_until = None;
         }
+        look |= settle_until.is_some() && last_look.elapsed() >= RETRY;
 
         // Where the windows really went, once they stop: apps that refused
         // a size, a window that does not fit after all.
@@ -191,6 +203,10 @@ pub fn run<B: Backend>(
         if started && look {
             last_look = Instant::now();
             manager.refresh();
+            let took = last_look.elapsed();
+            if took > SLOW {
+                debug!("slow look at the window list: {} ms", took.as_millis());
+            }
         }
 
         // Sleep only what is left of the frame, so frames stay evenly spaced
