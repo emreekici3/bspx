@@ -99,7 +99,7 @@ If windows stop moving after an update, macOS has dropped the permission for the
 | `bspx focus <dir>` | Focus the neighbouring window |
 | `bspx swap <dir>` | Swap with the neighbouring window |
 | `bspx warp <dir>` | Move into the neighbouring window's place: it splits as for a new window, and the window keeps the side it came from |
-| `bspx resize <dir> [amount]` | Move the window's border |
+| `bspx resize <dir> [amount]` | Move a border of the window toward `<dir>`: its left (top) border, or its right (bottom) one when it is against the left (top) of the screen |
 | `bspx rotate` | Rotate the layout 90° |
 | `bspx flip` | Swap the two halves of a split |
 | `bspx toggle-split` | Switch a split between side by side and stacked |

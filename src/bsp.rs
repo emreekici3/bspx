@@ -353,9 +353,12 @@ impl BspTree {
     }
 
     /// Moves a border of `win` by `delta` (fraction of the parent's size)
-    /// in direction `dir`. Prefers the border on the `dir` side of the window
-    /// (growing it); if the window touches the screen edge there, moves the
-    /// opposite border instead (shrinking it).
+    /// in direction `dir`: the arrow says where the border goes. The border
+    /// moved is the window's left (or top) one, the nearest if there are
+    /// several; a window against the left (top) of the screen has none, and
+    /// its right (bottom) border moves. So a window on the right grows with
+    /// left and shrinks with right, one on the left the other way round,
+    /// and one in between like one on the right.
     pub fn resize(&mut self, win: WinId, dir: Direction, delta: f32) -> bool {
         let Some(path) = self.path(win) else {
             return false;
@@ -364,12 +367,9 @@ impl BspTree {
             Direction::Left | Direction::Right => Split::Columns,
             Direction::Up | Direction::Down => Split::Rows,
         };
-        // The side the window must be on for the split's border to be the
-        // window's border facing `dir`.
-        let facing = match dir {
-            Direction::Right | Direction::Down => Side::A,
-            Direction::Left | Direction::Up => Side::B,
-        };
+        // The window is the second half of a split whose border is its left
+        // (top) one.
+        let facing = Side::B;
 
         let mut facing_depth = None;
         let mut any_depth = None;
@@ -846,5 +846,68 @@ mod tests {
         let mut other = a.clone();
         other.swap(1, 2);
         assert!(a.interpolate(&other, 0.5).is_none(), "windows moved");
+    }
+    #[test]
+    fn an_arrow_moves_a_border_its_way_left_or_top_border_first() {
+        // Three side by side: 1 | 2 | 3.
+        let mut three = tree(&[1, 2]);
+        three.insert_at(3, 2, Direction::Right);
+        let f = |t: &BspTree, w: WinId| {
+            t.layout(AREA, GAP)
+                .into_iter()
+                .find(|(x, _)| *x == w)
+                .unwrap()
+                .1
+        };
+        // (window, arrow, grows): the border moved goes the arrow's way.
+        for (win, dir, grows) in [
+            (1, Direction::Right, true),
+            (1, Direction::Left, false),
+            (2, Direction::Left, true),
+            (2, Direction::Right, false),
+            (3, Direction::Left, true),
+            (3, Direction::Right, false),
+        ] {
+            let mut t = three.clone();
+            let before = f(&t, win);
+            assert!(t.resize(win, dir, 0.1));
+            let after = f(&t, win);
+            assert_eq!(after.w > before.w, grows, "window {win} {dir:?}");
+            // The edge that moved went the arrow's way.
+            let moved = if after.x != before.x {
+                after.x - before.x
+            } else {
+                after.max_x() - before.max_x()
+            };
+            match dir {
+                Direction::Left => assert!(moved < 0, "window {win} {dir:?}"),
+                _ => assert!(moved > 0, "window {win} {dir:?}"),
+            }
+        }
+        // Stacked, the same with up and down: 1 / 2 / 3.
+        let mut stack = BspTree::new();
+        let tall = Rect::new(0, 0, 600, 1000);
+        stack.insert(1, None, tall, GAP, 0.5);
+        stack.insert(2, Some(1), tall, GAP, 0.5);
+        stack.insert_at(3, 2, Direction::Down);
+        let h = |t: &BspTree, w: WinId| {
+            t.layout(tall, GAP)
+                .into_iter()
+                .find(|(x, _)| *x == w)
+                .unwrap()
+                .1
+                .h
+        };
+        for (win, dir, grows) in [
+            (1, Direction::Down, true),
+            (2, Direction::Up, true),
+            (2, Direction::Down, false),
+            (3, Direction::Up, true),
+        ] {
+            let mut t = stack.clone();
+            let before = h(&t, win);
+            assert!(t.resize(win, dir, 0.1));
+            assert_eq!(h(&t, win) > before, grows, "window {win} {dir:?}");
+        }
     }
 }
