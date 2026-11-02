@@ -84,6 +84,68 @@ impl Node {
     }
 }
 
+/// Where a moved border is, seen from a node next to it: at its start (left
+/// or top) or at its end (right or bottom).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Edge {
+    Start,
+    End,
+}
+
+/// The width (`Columns`) or height (`Rows`) of `r`.
+fn extent(r: Rect, split: Split) -> i32 {
+    match split {
+        Split::Columns => r.w,
+        Split::Rows => r.h,
+    }
+}
+
+/// Re-splits `node` (now in `area`, before in `old_area`, the moved border
+/// at its `edge`) so that its windows away from the border keep their size:
+/// see `BspTree::keep_far_sizes`.
+fn absorb(
+    node: &mut Node,
+    old: &Node,
+    area: Rect,
+    old_area: Rect,
+    border: Split,
+    edge: Edge,
+    gap: i32,
+) {
+    let (
+        Node::Split { split, ratio, a, b },
+        Node::Split {
+            ratio: old_ratio,
+            a: old_a,
+            b: old_b,
+            ..
+        },
+    ) = (node, old)
+    else {
+        return;
+    };
+    let (old_ra, old_rb) = split_rect(old_area, *split, *old_ratio, gap);
+    if *split == border {
+        // The half away from the border keeps its size.
+        let avail = (extent(area, border) - gap).max(2);
+        let first = match edge {
+            Edge::End => extent(old_ra, border),
+            Edge::Start => avail - extent(old_rb, border),
+        };
+        *ratio = (first as f32 / avail as f32).clamp(MIN_RATIO, MAX_RATIO);
+        let (ra, rb) = split_rect(area, *split, *ratio, gap);
+        match edge {
+            Edge::End => absorb(b, old_b, rb, old_rb, border, edge, gap),
+            Edge::Start => absorb(a, old_a, ra, old_ra, border, edge, gap),
+        }
+    } else {
+        // Both halves are against the border.
+        let (ra, rb) = split_rect(area, *split, *ratio, gap);
+        absorb(a, old_a, ra, old_ra, border, edge, gap);
+        absorb(b, old_b, rb, old_rb, border, edge, gap);
+    }
+}
+
 /// Splits `area` into the two child areas of a split node, leaving `gap`
 /// points between them.
 pub fn split_rect(area: Rect, split: Split, ratio: f32, gap: i32) -> (Rect, Rect) {
@@ -359,10 +421,15 @@ impl BspTree {
     /// its right (bottom) border moves. So a window on the right grows with
     /// left and shrinks with right, one on the left the other way round,
     /// and one in between like one on the right.
-    pub fn resize(&mut self, win: WinId, dir: Direction, delta: f32) -> bool {
+    ///
+    /// Only the windows along the moved border change size: on both sides,
+    /// the windows further away keep theirs (see `keep_far_sizes`). `area`
+    /// and `gap` are what the tree is laid out in.
+    pub fn resize(&mut self, win: WinId, dir: Direction, delta: f32, area: Rect, gap: i32) -> bool {
         let Some(path) = self.path(win) else {
             return false;
         };
+        let old = self.clone();
         let wanted = match dir {
             Direction::Left | Direction::Right => Split::Columns,
             Direction::Up | Direction::Down => Split::Rows,
@@ -395,10 +462,11 @@ impl BspTree {
         };
         if let Node::Split { ratio, .. } = self.node_at_mut(&path[..depth]) {
             *ratio = (*ratio + signed).clamp(MIN_RATIO, MAX_RATIO);
-            true
         } else {
-            false
+            return false;
         }
+        self.keep_far_sizes(&path[..depth], &old, area, gap);
+        true
     }
 
     /// Places the border on the `dir` side of `win` at an absolute screen
@@ -446,12 +514,69 @@ impl BspTree {
             Split::Columns => (coord - r.x) as f32 / (r.w - gap).max(1) as f32,
             Split::Rows => (coord - r.y) as f32 / (r.h - gap).max(1) as f32,
         };
+        let old = self.clone();
         if let Node::Split { ratio, .. } = self.node_at_mut(&path[..depth]) {
             *ratio = new_ratio.clamp(MIN_RATIO, MAX_RATIO);
-            true
         } else {
-            false
+            return false;
         }
+        self.keep_far_sizes(&path[..depth], &old, area, gap);
+        true
+    }
+
+    /// After the split at `prefix` moved its border (`old` is the tree from
+    /// before), only the windows touching that border change size. On each
+    /// side, every split of the same kind keeps the size of its half away
+    /// from the border; the half against it takes the change, down to the
+    /// windows themselves. (A split the other way has both halves against
+    /// the border: both change, as they must.)
+    fn keep_far_sizes(&mut self, prefix: &[Side], old: &BspTree, area: Rect, gap: i32) {
+        let Some(at) = old.area_at(prefix, area, gap) else {
+            return;
+        };
+        let Some(was) = old.node_at(prefix) else {
+            return;
+        };
+        if let (
+            Node::Split { split, ratio, a, b },
+            Node::Split {
+                ratio: old_ratio,
+                a: old_a,
+                b: old_b,
+                ..
+            },
+        ) = (self.node_at_mut(prefix), was)
+        {
+            let (ra, rb) = split_rect(at, *split, *ratio, gap);
+            let (old_ra, old_rb) = split_rect(at, *split, *old_ratio, gap);
+            absorb(a, old_a, ra, old_ra, *split, Edge::End, gap);
+            absorb(b, old_b, rb, old_rb, *split, Edge::Start, gap);
+        }
+    }
+
+    /// The area of the node at `path`.
+    fn area_at(&self, path: &[Side], area: Rect, gap: i32) -> Option<Rect> {
+        let mut node = self.root.as_ref()?;
+        let mut rect = area;
+        for side in path {
+            let Node::Split { split, ratio, a, b } = node else {
+                return None;
+            };
+            let (ra, rb) = split_rect(rect, *split, *ratio, gap);
+            (node, rect) = if *side == Side::A { (a, ra) } else { (b, rb) };
+        }
+        Some(rect)
+    }
+
+    fn node_at(&self, path: &[Side]) -> Option<&Node> {
+        let mut node = self.root.as_ref()?;
+        for side in path {
+            let Node::Split { a, b, .. } = node else {
+                return None;
+            };
+            node = if *side == Side::A { a } else { b };
+        }
+        Some(node)
     }
 
     /// The area of the split that directly contains `win`: what the window
@@ -724,20 +849,20 @@ mod tests {
     #[test]
     fn resize_grows_toward_direction() {
         let mut t = tree(&[1, 2]);
-        assert!(t.resize(1, Direction::Right, 0.1));
+        assert!(t.resize(1, Direction::Right, 0.1, AREA, GAP));
         assert_eq!(frame(&t, 1).w, 594);
         // Window 2 has no right border to move: its left border moves right instead.
-        assert!(t.resize(2, Direction::Right, 0.1));
+        assert!(t.resize(2, Direction::Right, 0.1, AREA, GAP));
         assert_eq!(frame(&t, 1).w, 693);
         // No row split exists.
-        assert!(!t.resize(1, Direction::Down, 0.1));
+        assert!(!t.resize(1, Direction::Down, 0.1, AREA, GAP));
     }
 
     #[test]
     fn resize_picks_nearest_matching_border() {
         let mut t = tree(&[1, 2, 3]);
         // Window 3 sits in the bottom row of the right column: moving up hits the row split.
-        assert!(t.resize(3, Direction::Up, 0.1));
+        assert!(t.resize(3, Direction::Up, 0.1, AREA, GAP));
         assert!(frame(&t, 3).h > 295);
         assert_eq!(frame(&t, 1), Rect::new(0, 0, 495, 600));
     }
@@ -761,7 +886,7 @@ mod tests {
     fn ratio_is_clamped() {
         let mut t = tree(&[1, 2]);
         for _ in 0..20 {
-            t.resize(1, Direction::Right, 0.2);
+            t.resize(1, Direction::Right, 0.2, AREA, GAP);
         }
         assert!(frame(&t, 2).w >= 20);
     }
@@ -796,8 +921,8 @@ mod tests {
     fn equalize_puts_every_border_back_in_the_middle() {
         let fresh = tree(&[1, 2, 3]);
         let mut t = fresh.clone();
-        t.resize(3, Direction::Left, 0.2);
-        t.resize(3, Direction::Up, 0.2);
+        t.resize(3, Direction::Left, 0.2, AREA, GAP);
+        t.resize(3, Direction::Up, 0.2, AREA, GAP);
         assert_ne!(t.layout(AREA, GAP), fresh.layout(AREA, GAP));
         t.equalize(0.5);
         assert_eq!(t.layout(AREA, GAP), fresh.layout(AREA, GAP));
@@ -838,7 +963,7 @@ mod tests {
     fn interpolates_ratios_between_trees_of_one_shape() {
         let a = tree(&[1, 2, 3]);
         let mut b = a.clone();
-        b.resize(1, Direction::Right, 0.2);
+        b.resize(1, Direction::Right, 0.2, AREA, GAP);
         let half = a.interpolate(&b, 0.5).unwrap();
         let w = |t: &BspTree| t.layout(AREA, GAP)[0].1.w;
         assert!(w(&a) < w(&half) && w(&half) < w(&b));
@@ -870,7 +995,7 @@ mod tests {
         ] {
             let mut t = three.clone();
             let before = f(&t, win);
-            assert!(t.resize(win, dir, 0.1));
+            assert!(t.resize(win, dir, 0.1, AREA, GAP));
             let after = f(&t, win);
             assert_eq!(after.w > before.w, grows, "window {win} {dir:?}");
             // The edge that moved went the arrow's way.
@@ -906,8 +1031,44 @@ mod tests {
         ] {
             let mut t = stack.clone();
             let before = h(&t, win);
-            assert!(t.resize(win, dir, 0.1));
+            assert!(t.resize(win, dir, 0.1, tall, GAP));
             assert_eq!(h(&t, win) > before, grows, "window {win} {dir:?}");
         }
+    }
+    #[test]
+    fn only_the_windows_along_a_moved_border_change_size() {
+        // 1 | (2 | 3): the middle window's left border is the outer split.
+        let mut three = tree(&[1, 2]);
+        three.insert_at(3, 2, Direction::Right);
+        let w = |t: &BspTree, win: WinId| {
+            t.layout(AREA, GAP)
+                .into_iter()
+                .find(|(x, _)| *x == win)
+                .unwrap()
+                .1
+        };
+        // The middle window grows to the left: the right one stays as it is.
+        let mut t = three.clone();
+        let (one, two, right) = (w(&t, 1), w(&t, 2), w(&t, 3));
+        t.resize(2, Direction::Left, 0.1, AREA, GAP);
+        assert!(w(&t, 2).w > two.w);
+        assert!(w(&t, 1).w < one.w);
+        assert_eq!(
+            w(&t, 3),
+            right,
+            "the window away from the border keeps its frame"
+        );
+        // The left window grows: only the middle one gives way.
+        let mut t = three.clone();
+        t.resize(1, Direction::Right, 0.1, AREA, GAP);
+        assert!(w(&t, 1).w > one.w);
+        assert!(w(&t, 2).w < two.w);
+        assert_eq!(w(&t, 3), right);
+        // Windows stacked against the border both change, as they must:
+        // 1 | (2 / 3), window 1 grows.
+        let mut t = tree(&[1, 2, 3]);
+        let (two, three) = (w(&t, 2), w(&t, 3));
+        t.resize(1, Direction::Right, 0.1, AREA, GAP);
+        assert!(w(&t, 2).w < two.w && w(&t, 3).w < three.w);
     }
 }

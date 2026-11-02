@@ -52,7 +52,7 @@ pub struct Manager<B: Backend> {
     /// last of them was. A window seen to refuse its size right after one
     /// stops that resize where it fits: the first time bspx learns a
     /// window's minimum is by going past it.
-    resize_anchor: Option<(BspTree, f64)>,
+    resize_anchor: Option<ResizeRun>,
     /// The drop highlight on screen, if any.
     shown_overlay: Option<Overlay>,
     /// What the system last said had focus; see `sync_focus`.
@@ -155,6 +155,16 @@ type MinSizes = HashMap<WinId, (i32, i32)>;
 
 /// How long the window that stopped a command is highlighted.
 const FLASH_SECS: f64 = 0.3;
+
+/// The user's latest run of resizes: the layout before the first, when the
+/// last was, and, when they were all key presses for one window and one
+/// direction, which and how far in all.
+#[derive(Clone)]
+struct ResizeRun {
+    before: BspTree,
+    at: f64,
+    keys: Option<(WinId, Direction, f32)>,
+}
 
 /// Resizes this close together are one run (a key held down); a window
 /// refusing its size this soon after the last one stops the run.
@@ -474,10 +484,19 @@ impl<B: Backend> Manager<B> {
         // A window refused its size just after the user's resize: the resize
         // went past it. It stops where the window fits.
         if learned
-            && let Some((anchor, at)) = self.resize_anchor.clone()
-            && self.clock - at <= RESIZE_RUN_SECS + 1.0
+            && let Some(run) = self.resize_anchor.clone()
+            && self.clock - run.at <= RESIZE_RUN_SECS + 1.0
         {
-            let (tree, stopper) = self.limited(&anchor, self.tree.clone());
+            let now = self.tree.clone();
+            let (area, gap) = (self.inner_area(), self.config.gap);
+            let (tree, stopper) = match run.keys {
+                // The same keys, pressed less far.
+                Some((win, dir, total)) => self.limited_by(&run.before, &now, |t| {
+                    let mut tree = run.before.clone();
+                    tree.resize(win, dir, total * t, area, gap).then_some(tree)
+                }),
+                None => self.limited(&run.before, now),
+            };
             if tree != self.tree {
                 debug!("the last resize went past what a window accepts; it stops there");
                 self.tree = tree;
@@ -496,17 +515,30 @@ impl<B: Backend> Manager<B> {
     /// Notes that the user is resizing: the layout before the first resize
     /// of a run is where a resize that turns out to go too far is measured
     /// from.
-    fn note_resize(&mut self, before: &BspTree) {
-        let fresh = self
-            .resize_anchor
-            .as_ref()
-            .is_none_or(|(_, at)| self.clock - at > RESIZE_RUN_SECS);
-        let anchor = if fresh {
-            before.clone()
-        } else {
-            self.resize_anchor.take().expect("not fresh").0
+    /// `keys`: a key press resizing that window that way that much; `None`
+    /// for the mouse.
+    fn note_resize(&mut self, before: &BspTree, keys: Option<(WinId, Direction, f32)>) {
+        let run = match self.resize_anchor.take() {
+            Some(run) if self.clock - run.at <= RESIZE_RUN_SECS => {
+                let keys = match (run.keys, keys) {
+                    (Some((w, d, total)), Some((w2, d2, more))) if w == w2 && d == d2 => {
+                        Some((w, d, total + more))
+                    }
+                    _ => None,
+                };
+                ResizeRun {
+                    at: self.clock,
+                    keys,
+                    ..run
+                }
+            }
+            _ => ResizeRun {
+                before: before.clone(),
+                at: self.clock,
+                keys,
+            },
         };
-        self.resize_anchor = Some((anchor, self.clock));
+        self.resize_anchor = Some(run);
     }
 
     /// Tiles `id` by splitting `target` (or the last window), along the
@@ -658,22 +690,32 @@ impl<B: Backend> Manager<B> {
     /// `after` as it can go. Returns the tree and the window that stopped
     /// it, if one did.
     fn limited(&self, before: &BspTree, after: BspTree) -> (BspTree, Option<WinId>) {
-        let Some(stopper) = self.squeezed(before, &after) else {
-            return (after, None);
+        let step = |t: f32| before.interpolate(&after, t);
+        self.limited_by(before, &after, step)
+    }
+
+    /// Like `limited`, with `step(t)` the change made `t` of the way (0 to
+    /// 1): the furthest step that squeezes no window below what it accepts.
+    fn limited_by(
+        &self,
+        before: &BspTree,
+        after: &BspTree,
+        step: impl Fn(f32) -> Option<BspTree>,
+    ) -> (BspTree, Option<WinId>) {
+        let Some(stopper) = self.squeezed(before, after) else {
+            return (after.clone(), None);
         };
         let (mut fits, mut not) = (0.0_f32, 1.0_f32);
         for _ in 0..24 {
             let t = (fits + not) / 2.0;
-            match before.interpolate(&after, t) {
+            match step(t) {
                 Some(tree) if self.squeezed(before, &tree).is_none() => fits = t,
                 Some(_) => not = t,
-                // Not just a change of ratios: nothing to stop part-way.
-                None => return (after, Some(stopper)),
+                // Not a change that can stop part-way: leave it be.
+                None => return (after.clone(), Some(stopper)),
             }
         }
-        let tree = before
-            .interpolate(&after, fits)
-            .unwrap_or_else(|| before.clone());
+        let tree = step(fits).unwrap_or_else(|| before.clone());
         (tree, Some(stopper))
     }
 
@@ -1129,7 +1171,7 @@ impl<B: Backend> Manager<B> {
                     // follows, neighbours included.
                     let (area, gap) = (self.inner_area(), self.config.gap);
                     let unchanged = self.tree.clone();
-                    self.note_resize(&unchanged);
+                    self.note_resize(&unchanged, None);
                     let coord = |dir| match dir {
                         Direction::Left => frame.x - gap,
                         Direction::Up => frame.y - gap,
@@ -1352,7 +1394,7 @@ impl<B: Backend> Manager<B> {
         // as far as the windows there accept.
         let (area, gap) = (self.inner_area(), self.config.gap);
         let unchanged = self.tree.clone();
-        self.note_resize(&unchanged);
+        self.note_resize(&unchanged, None);
         if off(after.max_x(), before.max_x()) {
             self.tree.set_border(id, Right, after.max_x(), area, gap);
         }
@@ -1558,12 +1600,20 @@ impl<B: Backend> Manager<B> {
                 let amount = amount.unwrap_or(self.config.resize_step);
                 let before = self.slots();
                 let unchanged = self.tree.clone();
-                self.note_resize(&unchanged);
-                if !self.tree.resize(win, dir, amount) {
+                self.note_resize(&unchanged, Some((win, dir, amount)));
+                let (area, gap) = (self.inner_area(), self.config.gap);
+                if !self.tree.resize(win, dir, amount, area, gap) {
                     return Err("nothing to resize in that direction".into());
                 }
-                // As far as the windows there accept.
-                let (tree, stopper) = self.limited(&unchanged, self.tree.clone());
+                // As far as the windows there accept: the same resize, by a
+                // smaller amount (so the windows away from the border still
+                // keep their size).
+                let step = |t: f32| {
+                    let mut tree = unchanged.clone();
+                    tree.resize(win, dir, amount * t, area, gap).then_some(tree)
+                };
+                let after = self.tree.clone();
+                let (tree, stopper) = self.limited_by(&unchanged, &after, step);
                 self.tree = tree;
                 if let Some(w) = stopper {
                     self.flash(w);
@@ -4089,5 +4139,47 @@ pub(crate) mod tests {
         // Without what was learned, both go ahead as before.
         m.min_sizes.clear();
         m.execute(&Command::Warp(Direction::Left)).unwrap();
+    }
+    #[test]
+    fn the_middle_window_grows_alone_up_to_its_neighbours_minimum() {
+        // Three side by side on a wide screen: 1 | (2 | 3).
+        let mut m = manager(0.0);
+        m.backend.area = Rect::new(0, 25, 1800, 600);
+        m.backend.open(1, "Claude");
+        m.backend.min.insert(1, (500, 0));
+        m.refresh();
+        m.backend.open(2, "Terminal");
+        m.refresh();
+        m.backend.focused = Some(2);
+        m.refresh();
+        m.backend.open(3, "Terminal");
+        m.refresh();
+        // Dropped beside window 2 with the insert modifier, as by hand.
+        m.tree.remove(3);
+        m.tree.insert_at(3, 2, Direction::Right);
+        m.relayout();
+        m.backend.focused = Some(2);
+        m.focused = Some(2);
+        m.refresh();
+        let right = m.backend().frame(3);
+        assert!(m.backend().frame(1).max_x() < m.backend().frame(2).x);
+        assert!(m.backend().frame(2).max_x() < right.x, "three columns");
+        // The middle one grows to the left, a key press at a time.
+        let mut stopped = false;
+        for _ in 0..15 {
+            stopped |= m
+                .execute(&Command::Resize(Direction::Left, Some(0.05)))
+                .is_err();
+            m.refresh();
+            assert_eq!(
+                m.backend().frame(3),
+                right,
+                "the right window does not move"
+            );
+        }
+        assert!(stopped);
+        let (one, two) = (m.backend().frame(1), m.backend().frame(2));
+        assert_eq!(one.w, 500, "window 1 at its minimum");
+        assert_eq!(two.x, one.max_x() + 10, "window 2 right against it");
     }
 }
