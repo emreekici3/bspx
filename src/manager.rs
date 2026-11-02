@@ -9,9 +9,10 @@ use crate::bsp::{self, BspTree, WinId};
 use crate::command::{Command, Zoom};
 use crate::config::{Config, MouseAction, app_matches};
 use crate::geometry::{Direction, Rect};
-use crate::platform::{Backend, Modifier, MouseButton, Overlay, WindowEvent, WindowInfo};
+use crate::platform::{Backend, Display, Modifier, MouseButton, Overlay, WindowEvent, WindowInfo};
 
-/// The layout of a Space (virtual desktop) that is not on screen.
+/// The layout of a Space (virtual desktop) other than the current one: on
+/// another display, or not on screen.
 #[derive(Debug, Default)]
 struct SpaceState {
     tree: BspTree,
@@ -22,9 +23,13 @@ struct SpaceState {
 pub struct Manager<B: Backend> {
     backend: B,
     config: Config,
-    /// Layout of the Space on screen; `spaces` holds the others.
+    /// Layout of the current Space: the one on the display with the focused
+    /// window, which commands act on. `spaces` holds the others, those
+    /// other displays show included.
     tree: BspTree,
     active_space: u64,
+    /// The displays tiled, the main one first, from the last look.
+    displays: Vec<Display>,
     spaces: HashMap<u64, SpaceState>,
     anim: Animator,
     /// Last frame each window was seen at or sent to.
@@ -179,6 +184,7 @@ impl<B: Backend> Manager<B> {
             config,
             tree: BspTree::new(),
             active_space: 0,
+            displays: Vec::new(),
             spaces: HashMap::new(),
             anim,
             frames: HashMap::new(),
@@ -310,19 +316,60 @@ impl<B: Backend> Manager<B> {
     fn sync(&mut self, learn: bool) {
         let mut dirty = false;
 
-        let area = self.backend.tiling_area();
+        let mut displays = self.backend.displays();
+        if displays.is_empty() {
+            let area = self.backend.tiling_area();
+            let space = self.backend.active_space();
+            displays.push(Display {
+                frame: area,
+                area,
+                space,
+            });
+        }
+        if displays != self.displays {
+            debug!("displays: {displays:?}");
+            // Spaces no longer on screen: their windows stop moving.
+            for d in &self.displays {
+                if !displays.iter().any(|n| n.space == d.space)
+                    && let Some(state) = self.spaces.get(&d.space)
+                {
+                    for id in state.tree.windows() {
+                        self.anim.cancel(id);
+                    }
+                }
+            }
+            self.displays = displays;
+            dirty = true;
+        }
+        let shown = self.shown_spaces();
+
+        // The current display: the one with the focused window, else the
+        // one that was current while it is still there, else the main one.
+        let focused_now = self.backend.focused_window();
+        let space = focused_now
+            .and_then(|f| self.tiled_space_of(f))
+            .filter(|s| shown.contains(s))
+            .or_else(|| {
+                shown
+                    .contains(&self.active_space)
+                    .then_some(self.active_space)
+            })
+            .unwrap_or(shown[0]);
+        if space != self.active_space {
+            if shown.contains(&self.active_space) {
+                self.make_current(space);
+            } else {
+                self.switch_space(space);
+            }
+            dirty = true;
+        }
+        let area = self.display_area(space);
         if area != self.area {
             self.area = area;
             dirty = true;
         }
 
-        let space = self.backend.active_space();
-        if space != self.active_space {
-            self.switch_space(space);
-            dirty = true;
-        }
-
-        let focused_now = self.sync_focus();
+        self.note_focus(focused_now);
 
         let windows = self.backend.windows();
         let on_screen: HashSet<WinId> = windows.iter().map(|w| w.id).collect();
@@ -344,12 +391,13 @@ impl<B: Backend> Manager<B> {
         let spaces = self.backend.window_spaces(&ids);
         // Right after a Space switch the screen still shows windows bspx
         // tiles on another Space. Only those count: a window on every Space
-        // or on another display is always on screen and says nothing.
-        let switching =
-            self.all_tiled().iter().any(|(_, id)| {
-                on_screen.contains(id) && spaces.get(id).is_some_and(|s| *s != space)
-            }) || (!self.tree.is_empty()
-                && !self.tree.windows().iter().any(|w| on_screen.contains(w)));
+        // is always on screen and says nothing.
+        let switching = self.all_tiled().iter().any(|(_, id)| {
+            on_screen.contains(id) && spaces.get(id).is_some_and(|s| !shown.contains(s))
+        }) || (!self.tree.is_empty()
+            && !self.tree.windows().iter().any(|w| on_screen.contains(w)));
+        let frames_now: HashMap<WinId, Rect> = windows.iter().map(|w| (w.id, w.frame)).collect();
+        let hands_off = self.drag == Drag::None && !self.mouse_was_down;
 
         // Floating Spaces have no layout; their windows stay where they are.
         let float_spaces = self.float_space_ids();
@@ -369,16 +417,36 @@ impl<B: Backend> Manager<B> {
             let leave = if !alive.contains(&id) {
                 Some("closed")
             } else {
+                let on_display = shown.contains(&tree_space);
                 match spaces.get(&id) {
                     None => Some("minimised or hidden"),
+                    // Between two displays on screen, the layout decides
+                    // where a window goes (macOS says it is on the other
+                    // display's Space while it slides there); only one the
+                    // user put there and left there has moved.
+                    Some(&s)
+                        if s != tree_space
+                            && on_display
+                            && shown.contains(&s)
+                            && !(hands_off
+                                && !self.anim.is_animating(id)
+                                && frames_now.get(&id).is_some_and(|f| {
+                                    self.display_of_space(s).is_some_and(|d| {
+                                        let (x, y) = f.center();
+                                        d.frame.contains_point(x, y)
+                                    })
+                                })) =>
+                    {
+                        None
+                    }
                     Some(&s) if s != tree_space => {
                         moved.push((s, id));
                         Some("moved to another Space")
                     }
-                    Some(_) if tree_space == space && !on_screen.contains(&id) && !switching => {
+                    Some(_) if on_display && !on_screen.contains(&id) && !switching => {
                         Some("minimised or hidden")
                     }
-                    Some(_) if tree_space == space && !on_screen.contains(&id) => {
+                    Some(_) if on_display && !on_screen.contains(&id) => {
                         debug!("window {id} is off screen; kept while a Space switch settles");
                         None
                     }
@@ -388,13 +456,13 @@ impl<B: Backend> Manager<B> {
             if let Some(reason) = leave {
                 debug!("window {id} leaves the layout of Space {tree_space}: {reason}");
                 self.remove_from_space(tree_space, id);
-                dirty |= tree_space == space;
+                dirty |= shown.contains(&tree_space);
             }
         }
         // A window moved to another Space joins that Space's layout. One
-        // moved to this Space is picked up below, once it is on screen.
+        // moved to a Space on screen is picked up below.
         for (s, id) in moved {
-            if s != space && !float_spaces.contains(&s) {
+            if !shown.contains(&s) && !float_spaces.contains(&s) {
                 let (inner, gap, ratio) =
                     (self.inner_area(), self.config.gap, self.config.split_ratio);
                 let state = self.spaces.entry(s).or_default();
@@ -457,9 +525,9 @@ impl<B: Backend> Manager<B> {
                     continue;
                 }
             }
+            let on = spaces.get(&info.id).copied();
             let wanted = info.tileable
-                && !float_spaces.contains(&space)
-                && spaces.get(&info.id) == Some(&space)
+                && on.is_some_and(|s| shown.contains(&s) && !float_spaces.contains(&s))
                 && !self.floating.contains(&info.id)
                 && !self.closed.contains(&info.id)
                 && !self
@@ -467,16 +535,37 @@ impl<B: Backend> Manager<B> {
                     .float_apps
                     .iter()
                     .any(|a| app_matches(a, &info.app));
-            if wanted && !self.is_tiled_anywhere(info.id) {
-                new.push(info.id);
+            if let Some(s) = on.filter(|_| wanted && !self.is_tiled_anywhere(info.id)) {
+                new.push((info.id, s));
             }
         }
-        new.sort_by_key(|w| Some(*w) == focused_now);
-        for id in new {
-            let target = self.split_target(id);
-            self.tile(id, target);
-            if focused_now == Some(id) || self.focused.is_none() {
-                self.focused = Some(id);
+        new.sort_by_key(|(w, _)| Some(*w) == focused_now);
+        for (id, s) in new {
+            if s == self.active_space {
+                let target = self.split_target(id);
+                self.tile(id, target);
+                if focused_now == Some(id) || self.focused.is_none() {
+                    self.focused = Some(id);
+                }
+            } else {
+                // On another display: next to the window last focused there.
+                let (inner, gap, ratio) = (
+                    self.inner_area_of(s),
+                    self.config.gap,
+                    self.config.split_ratio,
+                );
+                let state = self.spaces.entry(s).or_default();
+                let target = state
+                    .focused
+                    .filter(|t| state.tree.contains(*t))
+                    .or_else(|| state.tree.windows().last().copied());
+                debug!("tiling window {id} next to {target:?} on another display");
+                state.tree.insert(id, target, inner, gap, ratio);
+                state.focused = Some(id);
+                if focused_now == Some(id) {
+                    self.make_current(s);
+                    self.focused = Some(id);
+                }
             }
             dirty = true;
         }
@@ -748,7 +837,7 @@ impl<B: Backend> Manager<B> {
                     if let Some((space, _)) = self.all_tiled().into_iter().find(|(_, w)| *w == id) {
                         debug!("window {id} closed");
                         self.remove_from_space(space, id);
-                        dirty |= space == self.active_space;
+                        dirty |= self.shown_spaces().contains(&space);
                         if self.focused == Some(id) {
                             self.focused = self.tree.windows().last().copied();
                         }
@@ -801,6 +890,186 @@ impl<B: Backend> Manager<B> {
         self.active_space = space;
     }
 
+    /// Makes the display showing `space` the current one, the one commands
+    /// act on. Both stay on screen, so nothing stops moving.
+    fn make_current(&mut self, space: u64) {
+        if space == self.active_space {
+            return;
+        }
+        debug!("display of Space {space} is now the current one");
+        let old = SpaceState {
+            tree: std::mem::take(&mut self.tree),
+            focused: self.focused.take(),
+            zoomed: self.zoomed.take(),
+        };
+        if !old.tree.is_empty() {
+            self.spaces.insert(self.active_space, old);
+        }
+        if let Some(state) = self.spaces.remove(&space) {
+            self.tree = state.tree;
+            self.focused = state.focused;
+            self.zoomed = state.zoomed;
+        }
+        self.active_space = space;
+        self.area = self.display_area(space);
+    }
+
+    /// The Spaces the displays show, the main display's first. Never empty
+    /// once bspx has looked: before that, the current Space.
+    fn shown_spaces(&self) -> Vec<u64> {
+        if self.displays.is_empty() {
+            return vec![self.active_space];
+        }
+        self.displays.iter().map(|d| d.space).collect()
+    }
+
+    fn display_of_space(&self, space: u64) -> Option<&Display> {
+        self.displays.iter().find(|d| d.space == space)
+    }
+
+    /// The tiling area of the display showing `space`; the current one's
+    /// for a Space not on screen (where it will be shown is not known).
+    fn display_area(&self, space: u64) -> Rect {
+        self.display_of_space(space)
+            .or_else(|| self.display_of_space(self.active_space))
+            .map_or(self.area, |d| d.area)
+    }
+
+    fn inner_area_of(&self, space: u64) -> Rect {
+        self.display_area(space).inset(&self.config.padding)
+    }
+
+    /// The Space whose layout window `id` is in.
+    fn tiled_space_of(&self, id: WinId) -> Option<u64> {
+        if self.tree.contains(id) {
+            return Some(self.active_space);
+        }
+        self.spaces
+            .iter()
+            .find(|(_, s)| s.tree.contains(id))
+            .map(|(&space, _)| space)
+    }
+
+    /// The layout of `space`, if it has one.
+    fn tree_of_mut(&mut self, space: u64) -> Option<&mut BspTree> {
+        if space == self.active_space {
+            Some(&mut self.tree)
+        } else {
+            self.spaces.get_mut(&space).map(|s| &mut s.tree)
+        }
+    }
+
+    /// Swaps two tiled windows, on one display or across two. The display
+    /// of `a` stays current, as `b`'s place now has `a`.
+    fn exchange(&mut self, a: WinId, b: WinId) -> bool {
+        let (Some(sa), Some(sb)) = (self.tiled_space_of(a), self.tiled_space_of(b)) else {
+            return false;
+        };
+        if self.zoomed.is_some_and(|(w, _)| w == a || w == b) {
+            self.zoomed = None;
+        }
+        if sa == sb {
+            return self.tree_of_mut(sa).is_some_and(|t| t.swap(a, b));
+        }
+        for (space, old, new) in [(sa, a, b), (sb, b, a)] {
+            if let Some(tree) = self.tree_of_mut(space) {
+                tree.replace(old, new);
+            }
+            if let Some(state) = self.spaces.get_mut(&space) {
+                if state.focused == Some(old) {
+                    state.focused = Some(new);
+                }
+                if state.zoomed.is_some_and(|(w, _)| w == old) {
+                    state.zoomed = None;
+                }
+            }
+        }
+        self.make_current(sb);
+        self.focused = Some(a);
+        info!("window {a} swapped with window {b} across displays");
+        true
+    }
+
+    /// Moves tiled window `win` into the layout of the display showing
+    /// `space`, next to `next_to` (on `side` of it, if given) or else to the
+    /// window last focused there. That display becomes the current one.
+    fn move_to_display(
+        &mut self,
+        win: WinId,
+        space: u64,
+        next_to: Option<WinId>,
+        side: Option<Direction>,
+    ) -> bool {
+        let Some(from) = self.tiled_space_of(win) else {
+            return false;
+        };
+        if from == space {
+            return false;
+        }
+        if self.zoomed.is_some_and(|(w, _)| w == win) {
+            self.zoomed = None;
+        }
+        self.remove_from_space(from, win);
+        if self.focused == Some(win) {
+            self.focused = self.tree.windows().last().copied();
+        }
+        self.make_current(space);
+        let (inner, gap, ratio) = (self.inner_area(), self.config.gap, self.config.split_ratio);
+        let target = next_to
+            .filter(|t| self.tree.contains(*t))
+            .or(self.focused.filter(|t| self.tree.contains(*t)))
+            .or_else(|| self.tree.windows().last().copied());
+        match (target, side) {
+            (Some(t), Some(side)) => {
+                self.tree.insert_at(win, t, side);
+            }
+            _ => {
+                self.tree.insert(win, target, inner, gap, ratio);
+            }
+        }
+        self.focused = Some(win);
+        info!("window {win} moved to another display");
+        true
+    }
+
+    /// The Space of the display next to the current one in direction `dir`.
+    fn display_toward(&self, dir: Direction) -> Option<u64> {
+        let frames: Vec<(WinId, Rect)> = self
+            .displays
+            .iter()
+            .enumerate()
+            .map(|(i, d)| (i as WinId, d.frame))
+            .collect();
+        let here = self
+            .displays
+            .iter()
+            .position(|d| d.space == self.active_space)?;
+        let next = bsp::neighbor(&frames, here as WinId, dir)?;
+        self.displays.get(next as usize).map(|d| d.space)
+    }
+
+    /// The Space of the display at a point, if it is on another display
+    /// than the current one.
+    fn other_display_at(&self, (x, y): (f32, f32)) -> Option<u64> {
+        self.displays
+            .iter()
+            .find(|d| d.frame.contains_point(x, y))
+            .map(|d| d.space)
+            .filter(|s| *s != self.active_space)
+    }
+
+    /// Makes current the display of window `id`, if it is tiled on another
+    /// display on screen. Returns whether it is now in the current layout.
+    fn bring_display_of(&mut self, id: WinId) -> bool {
+        if let Some(space) = self.tiled_space_of(id)
+            && space != self.active_space
+            && self.shown_spaces().contains(&space)
+        {
+            self.make_current(space);
+        }
+        self.tree.contains(id)
+    }
+
     /// The window a new window `id` splits: the focused one. But opening a
     /// window in an app that already has one (`open -na Terminal` from a
     /// shortcut, say) first brings that app to the front, and focus jumps
@@ -828,16 +1097,22 @@ impl<B: Backend> Manager<B> {
     /// must not undo a focus change bspx saw first. Returns the answer.
     fn sync_focus(&mut self) -> Option<WinId> {
         let now = self.backend.focused_window();
+        self.note_focus(now);
+        now
+    }
+
+    /// `sync_focus` with the system's answer `now` already asked for. Focus
+    /// on a window of another display makes that display the current one.
+    fn note_focus(&mut self, now: Option<WinId>) {
         if now != self.reported_focus {
             self.reported_focus = now;
-            if let Some(f) = now.filter(|f| self.tree.contains(*f)) {
+            if let Some(f) = now.filter(|f| self.bring_display_of(*f)) {
                 if let Some(prev) = self.focused.filter(|p| *p != f) {
                     self.focus_moved = Some((prev, self.clock));
                 }
                 self.focused = Some(f);
             }
         }
-        now
     }
 
     /// Every tiled window, with the Space whose layout it is in.
@@ -859,9 +1134,9 @@ impl<B: Backend> Manager<B> {
     }
 
     fn remove_from_space(&mut self, space: u64, id: WinId) {
+        self.anim.cancel(id);
         if space == self.active_space {
             self.tree.remove(id);
-            self.anim.cancel(id);
         } else if let Some(state) = self.spaces.get_mut(&space) {
             state.tree.remove(id);
             if state.focused == Some(id) {
@@ -940,7 +1215,7 @@ impl<B: Backend> Manager<B> {
             return;
         }
         self.hover = None;
-        let tiled = self.tree.contains(win);
+        let tiled = self.tiled_space_of(win).is_some();
         if self.reported_focus == Some(win) {
             return;
         }
@@ -951,7 +1226,7 @@ impl<B: Backend> Manager<B> {
                 .stack
                 .iter()
                 .take_while(|id| **id != win)
-                .filter(|id| self.manageable.contains(id) && !self.tree.contains(**id))
+                .filter(|id| self.manageable.contains(id) && !self.is_tiled_anywhere(**id))
                 .find(|id| self.frames.get(id).is_some_and(|f| f.intersects(&frame)));
             if let Some(float) = buried {
                 debug!("focus follows mouse: window {win} would cover floating window {float}");
@@ -970,7 +1245,7 @@ impl<B: Backend> Manager<B> {
         }
         debug!("focus follows mouse: window {win}");
         self.backend.focus(win);
-        if tiled {
+        if tiled && self.bring_display_of(win) {
             self.focused = Some(win);
         }
     }
@@ -981,7 +1256,7 @@ impl<B: Backend> Manager<B> {
         self.stack
             .iter()
             .copied()
-            .filter(|id| self.manageable.contains(id) || self.tree.contains(*id))
+            .filter(|id| self.manageable.contains(id) || self.is_tiled_anywhere(*id))
             .find(|id| self.frames.get(id).is_some_and(|f| f.contains_point(x, y)))
     }
 
@@ -991,7 +1266,7 @@ impl<B: Backend> Manager<B> {
         if !self.config.mouse_follows_focus {
             return;
         }
-        let Some((_, rect)) = self.targets().into_iter().find(|(id, _)| *id == win) else {
+        let Some((_, rect)) = self.all_targets().into_iter().find(|(id, _)| *id == win) else {
             return;
         };
         if self
@@ -1017,7 +1292,14 @@ impl<B: Backend> Manager<B> {
     fn press(&mut self) {
         // Where everything was before the user touched it.
         self.before_drag.clone_from(&self.frames);
-        let grabbed = self.backend.cursor().and_then(|(x, y)| {
+        let cursor = self.backend.cursor();
+        // A click on another display makes it the current one.
+        if let Some(space) = cursor.and_then(|c| self.other_display_at(c))
+            && self.shown_spaces().contains(&space)
+        {
+            self.make_current(space);
+        }
+        let grabbed = cursor.and_then(|(x, y)| {
             let hit = |id: &WinId| self.frames.get(id).is_some_and(|f| f.contains_point(x, y));
             // A zoomed window is in front of the ones it covers.
             let zoomed = self.zoomed.map(|(w, _)| w).filter(hit);
@@ -1088,7 +1370,7 @@ impl<B: Backend> Manager<B> {
             return;
         };
         let action = self.config.mouse_action(button);
-        let tiled = self.tree.contains(win);
+        let tiled = self.bring_display_of(win);
         if tiled && self.zoomed.is_some_and(|(w, _)| w == win) && action == MouseAction::Resize {
             // Resizing works on the split borders, which a zoom hides.
             self.zoomed = None;
@@ -1231,6 +1513,31 @@ impl<B: Backend> Manager<B> {
         );
         if grab.action == MouseAction::Move && grab.tiled {
             self.set_overlay(None);
+            // Onto a window of another display: it goes there.
+            let elsewhere = grab
+                .target
+                .and_then(|t| self.tiled_space_of(t).map(|s| (t, s)))
+                .filter(|(_, s)| *s != self.active_space);
+            if let Some((other, space)) = elsewhere {
+                match grab.side {
+                    Some(side) => {
+                        self.move_to_display(grab.win, space, Some(other), Some(side));
+                    }
+                    None => {
+                        self.exchange(grab.win, other);
+                    }
+                }
+                self.relayout();
+                return;
+            }
+            // Onto another display with no window under the pointer.
+            if grab.target.is_none()
+                && let Some(space) = self.other_display_at(pointer)
+            {
+                self.move_to_display(grab.win, space, None, None);
+                self.relayout();
+                return;
+            }
             let target = grab.target.filter(|t| self.tree.contains(*t));
             if let Some(other) = target.filter(|_| self.tree.contains(grab.win)) {
                 let mut tree = self.tree.clone();
@@ -1281,7 +1588,7 @@ impl<B: Backend> Manager<B> {
         insert: bool,
     ) -> (Option<WinId>, Option<Direction>) {
         let under = self
-            .targets()
+            .all_targets()
             .into_iter()
             .filter(|(id, _)| *id != win)
             .map(|(id, slot)| (id, slot, self.drawn_frame(id, slot)))
@@ -1325,7 +1632,14 @@ impl<B: Backend> Manager<B> {
                 if let Some(now) = self.backend.window_frame(win) {
                     self.frames.insert(win, now);
                 }
+                let cursor = self.backend.cursor();
                 match target {
+                    Some(other) if !self.tree.contains(other) => {
+                        self.exchange(win, other);
+                    }
+                    None if let Some(space) = cursor.and_then(|c| self.other_display_at(c)) => {
+                        self.move_to_display(win, space, None, None);
+                    }
                     Some(other) => {
                         let mut tree = self.tree.clone();
                         tree.swap(win, other);
@@ -1466,13 +1780,50 @@ impl<B: Backend> Manager<B> {
 
     /// The zoomed window and the area it covers.
     fn zoom_rect(&self) -> Option<(WinId, Rect)> {
-        let (win, zoom) = self.zoomed?;
-        let area = self.inner_area();
-        let rect = match zoom {
-            Zoom::Fullscreen => self.tree.contains(win).then_some(area)?,
-            Zoom::Parent => self.tree.parent_rect(win, area, self.config.gap)?,
-        };
-        Some((win, rect))
+        zoom_rect(&self.tree, self.zoomed, self.inner_area(), self.config.gap)
+    }
+
+    /// `targets`, for the windows on every display.
+    fn all_targets(&self) -> Vec<(WinId, Rect)> {
+        let mut out = self.targets();
+        let gap = self.config.gap;
+        for d in &self.displays {
+            if d.space == self.active_space {
+                continue;
+            }
+            let Some(state) = self.spaces.get(&d.space) else {
+                continue;
+            };
+            let inner = d.area.inset(&self.config.padding);
+            let zoomed = zoom_rect(&state.tree, state.zoomed, inner, gap);
+            out.extend(
+                state
+                    .tree
+                    .layout(inner, gap)
+                    .into_iter()
+                    .map(|(id, r)| match zoomed {
+                        Some((z, rect)) if z == id => (id, rect),
+                        _ => (id, r),
+                    }),
+            );
+        }
+        out
+    }
+
+    /// `slots`, for the windows on every display: the neighbours of a window
+    /// at the edge of its display are on the next one.
+    fn all_slots(&self) -> Vec<(WinId, Rect)> {
+        let mut out = self.slots();
+        let gap = self.config.gap;
+        for d in &self.displays {
+            if d.space == self.active_space {
+                continue;
+            }
+            if let Some(state) = self.spaces.get(&d.space) {
+                out.extend(state.tree.layout(d.area.inset(&self.config.padding), gap));
+            }
+        }
+        out
     }
 
     /// Frames as the tree lays them out, ignoring zoom: what the neighbours
@@ -1506,7 +1857,7 @@ impl<B: Backend> Manager<B> {
             Drag::Gesture(g) if g.action == MouseAction::Move => Some(g.win),
             _ => None,
         };
-        for (id, target) in self.targets() {
+        for (id, target) in self.all_targets() {
             if Some(id) == held {
                 continue;
             }
@@ -1530,16 +1881,24 @@ impl<B: Backend> Manager<B> {
         match *cmd {
             Command::Focus(dir) => {
                 let from = focused()?;
-                let to =
-                    bsp::neighbor(&self.slots(), from, dir).ok_or("no window in that direction")?;
+                // At the edge of a display, the next display's windows.
+                let to = bsp::neighbor(&self.all_slots(), from, dir)
+                    .ok_or("no window in that direction")?;
                 self.backend.focus(to);
+                self.bring_display_of(to);
                 self.focused = Some(to);
                 self.warp_to(to);
             }
             Command::Swap(dir) => {
                 let from = focused()?;
-                let to =
-                    bsp::neighbor(&self.slots(), from, dir).ok_or("no window in that direction")?;
+                let to = bsp::neighbor(&self.all_slots(), from, dir)
+                    .ok_or("no window in that direction")?;
+                if !self.tree.contains(to) {
+                    self.exchange(from, to);
+                    self.relayout();
+                    self.warp_to(from);
+                    return Ok(String::new());
+                }
                 let mut tree = self.tree.clone();
                 tree.swap(from, to);
                 if let Some(w) = self.squeezed(&self.tree, &tree) {
@@ -1551,8 +1910,22 @@ impl<B: Backend> Manager<B> {
             }
             Command::Warp(dir) => {
                 let from = focused()?;
-                let to =
-                    bsp::neighbor(&self.slots(), from, dir).ok_or("no window in that direction")?;
+                // Across the edge of the display: into the next display's
+                // layout, next to its window there, or alone on it.
+                let next = bsp::neighbor(&self.all_slots(), from, dir);
+                let across = match next {
+                    Some(to) => self.tiled_space_of(to).filter(|s| *s != self.active_space),
+                    None => self.display_toward(dir),
+                };
+                if let Some(space) = across {
+                    if !self.move_to_display(from, space, next, None) {
+                        return Err("no window in that direction".into());
+                    }
+                    self.relayout();
+                    self.warp_to(from);
+                    return Ok(String::new());
+                }
+                let to = next.ok_or("no window in that direction")?;
                 let (inner, gap, ratio) =
                     (self.inner_area(), self.config.gap, self.config.split_ratio);
                 let before: HashMap<WinId, Rect> = self.slots().into_iter().collect();
@@ -1834,7 +2207,7 @@ impl<B: Backend> Manager<B> {
             let f = self.anim.target(id).unwrap_or(self.frames[&id]);
             let state = if self.zoomed.is_some_and(|(w, _)| w == id) {
                 "zoomed"
-            } else if self.tree.contains(id) {
+            } else if self.is_tiled_anywhere(id) {
                 "tiled"
             } else {
                 "floating"
@@ -1864,6 +2237,21 @@ impl<B: Backend> Manager<B> {
         }
         out
     }
+}
+
+/// The zoomed window of a layout and the area it covers.
+fn zoom_rect(
+    tree: &BspTree,
+    zoomed: Option<(WinId, Zoom)>,
+    area: Rect,
+    gap: i32,
+) -> Option<(WinId, Rect)> {
+    let (win, zoom) = zoomed?;
+    let rect = match zoom {
+        Zoom::Fullscreen => tree.contains(win).then_some(area)?,
+        Zoom::Parent => tree.parent_rect(win, area, gap)?,
+    };
+    Some((win, rect))
 }
 
 #[cfg(test)]
@@ -1915,6 +2303,9 @@ pub(crate) mod tests {
         pub fading: HashSet<WinId>,
         /// The display's refresh rate, if known.
         pub frame_rate: Option<f64>,
+        /// Displays with their Spaces; empty means one, `area` showing
+        /// `active`.
+        pub displays: Vec<Display>,
     }
 
     impl MockBackend {
@@ -1939,11 +2330,15 @@ pub(crate) mod tests {
 
     impl Backend for MockBackend {
         fn windows(&mut self) -> Vec<WindowInfo> {
-            let shown = self.screen_space.unwrap_or(self.active);
+            let shown: Vec<u64> = if self.displays.is_empty() {
+                vec![self.screen_space.unwrap_or(self.active)]
+            } else {
+                self.displays.iter().map(|d| d.space).collect()
+            };
             self.windows
                 .iter()
                 .filter(|w| {
-                    self.space_of.get(&w.id).copied().unwrap_or(0) == shown
+                    shown.contains(&self.space_of.get(&w.id).copied().unwrap_or(0))
                         || self.sticky.contains(&w.id)
                 })
                 .filter(|w| !self.fading.contains(&w.id))
@@ -1972,6 +2367,17 @@ pub(crate) mod tests {
         }
         fn tiling_area(&mut self) -> Rect {
             self.area
+        }
+        fn displays(&mut self) -> Vec<Display> {
+            if self.displays.is_empty() {
+                vec![Display {
+                    frame: self.area,
+                    area: self.area,
+                    space: self.active,
+                }]
+            } else {
+                self.displays.clone()
+            }
         }
         fn set_frame(&mut self, id: WinId, frame: Rect) {
             let (min_w, min_h) = self.min.get(&id).copied().unwrap_or((0, 0));
@@ -3333,6 +3739,208 @@ pub(crate) mod tests {
         hover(&mut m, (700.0, 300.0), 0.3);
         assert!(m.backend().focus_calls.is_empty());
         m.backend.mouse = false;
+    }
+
+    /// The main display (Space 10) and one to its right (Space 20).
+    fn two_displays() -> Manager<MockBackend> {
+        let mut m = manager(0.0);
+        m.backend.active = 10;
+        m.backend.displays = vec![
+            Display {
+                frame: Rect::new(0, 0, 1000, 625),
+                area: Rect::new(0, 25, 1000, 600),
+                space: 10,
+            },
+            Display {
+                frame: Rect::new(1000, 0, 800, 625),
+                area: Rect::new(1000, 25, 800, 600),
+                space: 20,
+            },
+        ];
+        m
+    }
+
+    /// Opens window `id` on the display showing `space`, focused.
+    fn open_on(m: &mut Manager<MockBackend>, id: WinId, space: u64) {
+        m.backend.open(id, "App");
+        m.backend.space_of.insert(id, space);
+        let x = if space == 20 { 1100 } else { 100 };
+        m.backend.windows.last_mut().unwrap().frame = Rect::new(x, 100, 300, 200);
+        m.refresh();
+    }
+
+    const MAIN: Rect = Rect::new(0, 25, 1000, 600);
+    const SECOND: Rect = Rect::new(1000, 25, 800, 600);
+
+    #[test]
+    fn each_display_tiles_its_own_windows() {
+        let mut m = two_displays();
+        open_on(&mut m, 1, 10);
+        open_on(&mut m, 2, 10);
+        open_on(&mut m, 3, 20);
+        assert_eq!(m.backend().frame(1), Rect::new(0, 25, 495, 600));
+        assert_eq!(m.backend().frame(2), Rect::new(505, 25, 495, 600));
+        assert_eq!(m.backend().frame(3), SECOND);
+        // A new window splits the window focused on its own display.
+        open_on(&mut m, 4, 20);
+        assert_eq!(m.backend().frame(3), Rect::new(1000, 25, 395, 600));
+        assert_eq!(m.backend().frame(4), Rect::new(1405, 25, 395, 600));
+        assert_eq!(m.backend().frame(1), Rect::new(0, 25, 495, 600));
+        assert_eq!(m.backend().frame(2), Rect::new(505, 25, 495, 600));
+    }
+
+    #[test]
+    fn commands_act_on_the_display_of_the_focused_window() {
+        let mut m = two_displays();
+        open_on(&mut m, 1, 10);
+        open_on(&mut m, 2, 10);
+        open_on(&mut m, 3, 20);
+        open_on(&mut m, 4, 20);
+        m.backend.focused = Some(3);
+        m.refresh();
+        assert_eq!(m.active_space(), 20);
+        m.execute(&Command::Rotate).unwrap();
+        m.refresh();
+        assert_eq!(m.backend().frame(3), Rect::new(1000, 25, 800, 295));
+        assert_eq!(m.backend().frame(1), Rect::new(0, 25, 495, 600));
+        m.backend.focused = Some(1);
+        m.refresh();
+        assert_eq!(m.active_space(), 10);
+    }
+
+    #[test]
+    fn focus_crosses_to_the_next_display_at_the_edge() {
+        let mut m = two_displays();
+        open_on(&mut m, 1, 10);
+        open_on(&mut m, 2, 10);
+        open_on(&mut m, 3, 20);
+        m.backend.focused = Some(2);
+        m.refresh();
+        m.execute(&Command::Focus(Direction::Right)).unwrap();
+        assert_eq!(m.backend().focused, Some(3));
+        assert_eq!(m.active_space(), 20);
+        m.execute(&Command::Focus(Direction::Left)).unwrap();
+        assert_eq!(m.backend().focused, Some(2));
+        assert_eq!(m.active_space(), 10);
+        assert!(m.execute(&Command::Focus(Direction::Left)).is_ok());
+        assert_eq!(m.backend().focused, Some(1));
+        assert!(m.execute(&Command::Focus(Direction::Left)).is_err());
+    }
+
+    #[test]
+    fn warp_takes_a_window_to_an_empty_display() {
+        let mut m = two_displays();
+        open_on(&mut m, 1, 10);
+        open_on(&mut m, 2, 10);
+        m.backend.focused = Some(2);
+        m.refresh();
+        m.execute(&Command::Warp(Direction::Right)).unwrap();
+        m.refresh();
+        assert_eq!(m.backend().frame(2), SECOND);
+        assert_eq!(m.backend().frame(1), MAIN);
+        // macOS has not said it moved yet: the layout still holds it.
+        m.refresh();
+        assert_eq!(m.backend().frame(2), SECOND);
+        // And back, next to the window there.
+        m.backend.space_of.insert(2, 20);
+        m.execute(&Command::Warp(Direction::Left)).unwrap();
+        m.refresh();
+        assert_eq!(m.backend().frame(1), Rect::new(0, 25, 495, 600));
+        assert_eq!(m.backend().frame(2), Rect::new(505, 25, 495, 600));
+    }
+
+    #[test]
+    fn swap_trades_windows_across_displays() {
+        let mut m = two_displays();
+        open_on(&mut m, 1, 10);
+        open_on(&mut m, 2, 10);
+        open_on(&mut m, 3, 20);
+        m.backend.focused = Some(2);
+        m.refresh();
+        m.execute(&Command::Swap(Direction::Right)).unwrap();
+        m.refresh();
+        assert_eq!(m.backend().frame(2), SECOND);
+        assert_eq!(m.backend().frame(3), Rect::new(505, 25, 495, 600));
+        assert_eq!(m.active_space(), 20);
+    }
+
+    #[test]
+    fn a_window_the_user_puts_on_another_display_joins_its_layout() {
+        let mut m = two_displays();
+        open_on(&mut m, 1, 10);
+        open_on(&mut m, 2, 10);
+        open_on(&mut m, 3, 20);
+        // Moved there some other way than bspx (the Window menu, say).
+        m.backend.space_of.insert(1, 20);
+        m.backend
+            .windows
+            .iter_mut()
+            .find(|w| w.id == 1)
+            .unwrap()
+            .frame = Rect::new(1200, 300, 300, 200);
+        m.refresh();
+        assert_eq!(m.backend().frame(2), MAIN);
+        assert_eq!(m.backend().frame(3).w + m.backend().frame(1).w, 790);
+    }
+
+    #[test]
+    fn dragging_a_window_to_another_display_moves_it_there() {
+        let mut m = two_displays();
+        open_on(&mut m, 1, 10);
+        open_on(&mut m, 2, 10);
+        open_on(&mut m, 3, 20);
+        // Window 2 by its title bar, over window 3: they swap.
+        m.backend.cursor = (700.0, 35.0);
+        m.backend.mouse = true;
+        m.track_pointer();
+        m.backend.set_frame(2, Rect::new(1100, 200, 495, 600));
+        m.backend.cursor = (1300.0, 300.0);
+        m.track_pointer();
+        assert_eq!(m.backend().overlay.unwrap().above, 3);
+        m.backend.mouse = false;
+        m.track_pointer();
+        m.refresh();
+        assert_eq!(m.backend().frame(2), SECOND);
+        assert_eq!(m.backend().frame(3), Rect::new(505, 25, 495, 600));
+
+        // Window 1 onto a third display, empty: it moves there.
+        m.backend.displays.push(Display {
+            frame: Rect::new(-800, 0, 800, 625),
+            area: Rect::new(-800, 25, 800, 600),
+            space: 30,
+        });
+        m.refresh();
+        m.backend.cursor = (200.0, 35.0);
+        m.backend.mouse = true;
+        m.track_pointer();
+        m.backend.set_frame(1, Rect::new(-600, 200, 495, 600));
+        m.backend.cursor = (-400.0, 300.0);
+        m.track_pointer();
+        assert_eq!(m.backend().overlay, None);
+        m.backend.mouse = false;
+        m.track_pointer();
+        m.refresh();
+        assert_eq!(m.backend().frame(1), Rect::new(-800, 25, 800, 600));
+        assert_eq!(m.backend().frame(3), MAIN);
+    }
+
+    #[test]
+    fn unplugging_a_display_brings_its_windows_to_the_one_left() {
+        let mut m = two_displays();
+        open_on(&mut m, 1, 10);
+        open_on(&mut m, 2, 20);
+        m.backend.displays.truncate(1);
+        // macOS moves the windows over, to the Space shown there.
+        m.backend.space_of.insert(2, 10);
+        m.backend
+            .windows
+            .iter_mut()
+            .find(|w| w.id == 2)
+            .unwrap()
+            .frame = Rect::new(400, 100, 300, 200);
+        m.refresh();
+        assert_eq!(m.backend().frame(1).w, 495);
+        assert_eq!(m.backend().frame(2).w, 495);
     }
 
     fn three_spaces() -> Manager<MockBackend> {

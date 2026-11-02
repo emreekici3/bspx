@@ -17,7 +17,7 @@ use log::{debug, info, warn};
 
 use self::ffi::*;
 use self::overlay::OverlayWindow;
-use super::{Backend, Modifier, MouseButton, Overlay, WindowEvent, WindowInfo};
+use super::{Backend, Display, Modifier, MouseButton, Overlay, WindowEvent, WindowInfo};
 use crate::bsp::WinId;
 use crate::geometry::{Dock, DockEdge, Rect, usable_area};
 
@@ -390,12 +390,22 @@ fn cg_to_rect(r: CGRect) -> Rect {
     )
 }
 
-/// The primary display's frame and its visible frame (menu bar and Dock
-/// excluded), both in CoreGraphics coordinates (top-left origin).
-fn primary_screen_area() -> Option<Rect> {
+/// A display as AppKit sees it, in CoreGraphics coordinates (top-left
+/// origin).
+struct Screen {
+    id: CGDirectDisplayID,
+    frame: Rect,
+    /// The frame less the menu bar and Dock.
+    visible: Rect,
+}
+
+/// Every display, the primary one (with the menu bar) first.
+fn screens() -> Vec<Screen> {
     type MsgSendId = unsafe extern "C" fn(Id, Sel) -> Id;
+    type MsgSendIdArg = unsafe extern "C" fn(Id, Sel, Id) -> Id;
     type MsgSendIndex = unsafe extern "C" fn(Id, Sel, usize) -> Id;
     type MsgSendUsize = unsafe extern "C" fn(Id, Sel) -> usize;
+    type MsgSendU32 = unsafe extern "C" fn(Id, Sel) -> u32;
 
     unsafe fn rect_of(obj: Id, sel: Sel) -> CGRect {
         #[cfg(target_arch = "x86_64")]
@@ -415,38 +425,79 @@ fn primary_screen_area() -> Option<Rect> {
         }
     }
 
+    let mut out = Vec::new();
     unsafe {
         let send_id: MsgSendId = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        let send_id_arg: MsgSendIdArg = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
         let send_index: MsgSendIndex = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
         let send_usize: MsgSendUsize = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        let send_u32: MsgSendU32 = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
 
         let pool = objc_autoreleasePoolPush();
-        let result = (|| {
-            let class = objc_getClass(c"NSScreen".as_ptr());
-            if class.is_null() {
-                return None;
+        let class = objc_getClass(c"NSScreen".as_ptr());
+        let screens = if class.is_null() {
+            ptr::null_mut()
+        } else {
+            send_id(class, sel_registerName(c"screens".as_ptr()))
+        };
+        let count = if screens.is_null() {
+            0
+        } else {
+            send_usize(screens, sel_registerName(c"count".as_ptr()))
+        };
+        let number_key = cfstring("NSScreenNumber");
+        // Cocoa puts the origin at the bottom-left of the primary display
+        // (index 0, the one with the menu bar); CoreGraphics at its top-left.
+        let mut primary_h = 0.0;
+        for i in 0..count {
+            let screen = send_index(screens, sel_registerName(c"objectAtIndex:".as_ptr()), i);
+            if screen.is_null() {
+                continue;
             }
-            let screens = send_id(class, sel_registerName(c"screens".as_ptr()));
-            if screens.is_null() || send_usize(screens, sel_registerName(c"count".as_ptr())) == 0 {
-                return None;
+            let frame = rect_of(screen, sel_registerName(c"frame".as_ptr()));
+            let visible = rect_of(screen, sel_registerName(c"visibleFrame".as_ptr()));
+            if i == 0 {
+                primary_h = frame.size.height;
             }
-            // Index 0 is the screen with the menu bar, whose bottom-left
-            // corner is the origin of Cocoa's global coordinates.
-            let primary = send_index(screens, sel_registerName(c"objectAtIndex:".as_ptr()), 0);
-            let frame = rect_of(primary, sel_registerName(c"frame".as_ptr()));
-            let visible = rect_of(primary, sel_registerName(c"visibleFrame".as_ptr()));
-            // Flip to top-left origin.
-            let top = frame.size.height - (visible.origin.y + visible.size.height);
-            Some(Rect::new(
-                visible.origin.x.round() as i32,
-                top.round() as i32,
-                visible.size.width.round() as i32,
-                visible.size.height.round() as i32,
-            ))
-        })();
+            let flip = |r: CGRect| {
+                Rect::new(
+                    r.origin.x.round() as i32,
+                    (primary_h - (r.origin.y + r.size.height)).round() as i32,
+                    r.size.width.round() as i32,
+                    r.size.height.round() as i32,
+                )
+            };
+            let description = send_id(screen, sel_registerName(c"deviceDescription".as_ptr()));
+            let number = if description.is_null() {
+                ptr::null_mut()
+            } else {
+                send_id_arg(
+                    description,
+                    sel_registerName(c"objectForKey:".as_ptr()),
+                    number_key.ptr().cast_mut(),
+                )
+            };
+            let id = if number.is_null() {
+                if i == 0 { CGMainDisplayID() } else { 0 }
+            } else {
+                send_u32(number, sel_registerName(c"unsignedIntValue".as_ptr()))
+            };
+            out.push(Screen {
+                id,
+                frame: flip(frame),
+                visible: flip(visible),
+            });
+        }
         objc_autoreleasePoolPop(pool);
-        result.filter(|r| r.w > 0 && r.h > 0)
     }
+    out.retain(|s| s.visible.w > 0 && s.visible.h > 0);
+    out
+}
+
+/// The primary display's visible frame (menu bar and Dock excluded), in
+/// CoreGraphics coordinates (top-left origin).
+fn primary_screen_area() -> Option<Rect> {
+    screens().into_iter().next().map(|s| s.visible)
 }
 
 /// What the Dock is doing, as far as the tiled display is concerned.
@@ -666,8 +717,13 @@ impl MacBackend {
 
 /// The main display's UUID, as the Space functions name displays.
 fn main_display_uuid() -> Option<Cf> {
+    display_uuid(unsafe { CGMainDisplayID() })
+}
+
+/// A display's UUID, as the Space functions name displays.
+fn display_uuid(display: CGDirectDisplayID) -> Option<Cf> {
     unsafe {
-        let uuid = Cf::owned(CGDisplayCreateUUIDFromDisplayID(CGMainDisplayID()))?;
+        let uuid = Cf::owned(CGDisplayCreateUUIDFromDisplayID(display))?;
         Cf::owned(CFUUIDCreateString(ptr::null(), uuid.ptr()))
     }
 }
@@ -868,6 +924,8 @@ pub struct MacBackend {
     windows: HashMap<WinId, TrackedWindow>,
     lookups: HashMap<WinId, u8>,
     display: Rect,
+    /// The frames of the displays tiled, the main one first.
+    tiled: Vec<Rect>,
     /// Windows that exist on any Space, as of the last `windows()` call.
     alive: HashSet<WinId>,
     connection: i32,
@@ -904,6 +962,7 @@ impl MacBackend {
             windows: HashMap::new(),
             lookups: HashMap::new(),
             display: Rect::default(),
+            tiled: Vec::new(),
             alive: HashSet::new(),
             connection: unsafe { CGSMainConnectionID() },
             overlay: None,
@@ -1175,11 +1234,12 @@ impl Backend for MacBackend {
             }
         }
 
-        let display = self.display;
+        let tiled = &self.tiled;
         cg.into_iter()
             .map(|w| {
                 let (cx, cy) = w.frame.center();
-                let on_tiled_display = display.w == 0 || display.contains_point(cx, cy);
+                let on_tiled_display =
+                    tiled.is_empty() || tiled.iter().any(|d| d.contains_point(cx, cy));
                 let tracked = self.windows.get(&w.id).filter(|_| on_tiled_display);
                 WindowInfo {
                     id: w.id,
@@ -1227,6 +1287,46 @@ impl Backend for MacBackend {
         area
     }
 
+    fn displays(&mut self) -> Vec<Display> {
+        let main = Display {
+            area: self.tiling_area(),
+            frame: self.display,
+            space: self.active_space(),
+        };
+        let mut out = vec![main];
+        for screen in screens() {
+            if screen.frame == main.frame || screen.id == 0 {
+                continue;
+            }
+            let space = display_uuid(screen.id).map_or(0, |uuid| unsafe {
+                CGSManagedDisplayGetCurrentSpace(self.connection, uuid.ptr())
+            });
+            // With "Displays have separate Spaces" off, every display shows
+            // the main display's Space; only the main one is tiled then.
+            if space == 0 || out.iter().any(|d| d.space == space) {
+                continue;
+            }
+            let area = match self.dock.state(self.connection, screen.frame) {
+                DockState::Shown(d) => usable_area(screen.frame, screen.visible, Some(d)),
+                DockState::Hidden | DockState::Elsewhere => {
+                    usable_area(screen.frame, screen.visible, None)
+                }
+                DockState::Unknown => screen.visible,
+            };
+            out.push(Display {
+                frame: screen.frame,
+                area,
+                space,
+            });
+        }
+        let tiled: Vec<Rect> = out.iter().map(|d| d.frame).collect();
+        if tiled != self.tiled {
+            info!("tiling {} display(s): {out:?}", out.len());
+            self.tiled = tiled;
+        }
+        out
+    }
+
     fn set_frame(&mut self, id: WinId, frame: Rect) {
         self.write_frame(id, frame, &[Step::Size, Step::Position, Step::Size], true);
     }
@@ -1234,7 +1334,14 @@ impl Backend for MacBackend {
     fn animate_frame(&mut self, id: WinId, frame: Rect, prev: Rect) {
         let moved = (frame.x, frame.y) != (prev.x, prev.y);
         let resized = (frame.w, frame.h) != (prev.w, prev.h);
-        let order = if crate::platform::position_first(frame, prev, self.display) {
+        let (cx, cy) = prev.center();
+        let display = self
+            .tiled
+            .iter()
+            .copied()
+            .find(|d| d.contains_point(cx, cy))
+            .unwrap_or(self.display);
+        let order = if crate::platform::position_first(frame, prev, display) {
             [Step::Position, Step::Size]
         } else {
             [Step::Size, Step::Position]

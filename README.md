@@ -12,6 +12,7 @@
 
 - BSP tiling with smooth animations
 - A separate layout for every Space
+- Every display tiled on its own, with focus, swap, warp and drags going from one to the next
 - Zoom a window to full screen or its split's area, and back
 - Keeps clear of the Dock, uses the full screen when it hides
 - Swap a window with its neighbour, or warp it into its neighbour's place
@@ -216,6 +217,14 @@ bspx bind 'shift + alt - 3 : bspx send 3'
 `bspx layout coding float` stops tiling Space 3: its windows stay where you put them, and `alt`-drags still move and resize them. `bspx layout coding bsp` tiles it again.
 
 These use the macOS *Switch to Desktop N* shortcuts, so turn them on first: *System Settings → Keyboard → Keyboard Shortcuts → Mission Control*. With SIP enabled, recent macOS only lets a window change Spaces the way a person does it, so bspx holds the window by its title bar and switches Spaces: you go along with it.
+
+## Displays
+
+Each display has a layout of its own; a new window splits the window last focused on its display. Commands act on the display of the focused window.
+
+At the edge of a display, `bspx focus`, `swap` and `warp` carry on to the next display: `focus right` from a window against the right edge focuses the nearest window on the display to the right, `swap right` trades the two windows' places, and `warp right` moves the window into that display's layout (onto it alone if it has no window). Dragging a window onto another display's window swaps them, or splits it with the insert modifier held; dropping it on a part of another display with no window moves it into that display's layout.
+
+A display that is unplugged hands its windows to the ones left, as macOS moves them. Space names, rules and `bspx space` still go by the main display's Spaces. With *Displays have separate Spaces* off (*System Settings → Desktop & Dock*), the displays share one Space and only the main one is tiled.
 
 ## Configuration
 

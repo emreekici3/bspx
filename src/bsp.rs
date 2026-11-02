@@ -414,6 +414,18 @@ impl BspTree {
         true
     }
 
+    /// Puts window `new` where `old` is; `old` leaves the tree.
+    pub fn replace(&mut self, old: WinId, new: WinId) -> bool {
+        if self.contains(new) {
+            return false;
+        }
+        let Some(path) = self.path(old) else {
+            return false;
+        };
+        *self.node_at_mut(&path) = Node::Leaf(new);
+        true
+    }
+
     /// Moves a border of `win` by `delta` (fraction of the parent's size)
     /// in direction `dir`: the arrow says where the border goes. The border
     /// moved is the window's left (or top) one, the nearest if there are

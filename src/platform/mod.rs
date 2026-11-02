@@ -22,8 +22,19 @@ pub struct WindowInfo {
     pub movable: bool,
 }
 
+/// A display bspx tiles, as of the last look.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Display {
+    /// The whole display.
+    pub frame: Rect,
+    /// The part windows are tiled in (menu bar and Dock excluded).
+    pub area: Rect,
+    /// The Space it shows.
+    pub space: u64,
+}
+
 pub trait Backend {
-    /// All windows on screen: those on the active Space of the tiled display.
+    /// All windows on screen: those on the Spaces the displays show.
     fn windows(&mut self) -> Vec<WindowInfo>;
     /// The Space (virtual desktop) shown on the tiled display.
     fn active_space(&mut self) -> u64 {
@@ -59,6 +70,18 @@ pub trait Backend {
     fn focused_window(&mut self) -> Option<WinId>;
     /// The usable area of the display (menu bar and Dock excluded).
     fn tiling_area(&mut self) -> Rect;
+    /// The displays to tile, the main one (with the menu bar) first. Each
+    /// shows a Space of its own; one that shares a Space with another (with
+    /// "Displays have separate Spaces" off) is left out.
+    fn displays(&mut self) -> Vec<Display> {
+        let area = self.tiling_area();
+        let space = self.active_space();
+        vec![Display {
+            frame: area,
+            area,
+            space,
+        }]
+    }
     /// Moves and resizes a window.
     fn set_frame(&mut self, id: WinId, frame: Rect);
     /// Moves a window from `prev` to `frame`, touching only what changed: a
