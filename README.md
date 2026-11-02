@@ -16,6 +16,7 @@
 - Keeps clear of the Dock, uses the full screen when it hides
 - Swap a window with its neighbour, or warp it into its neighbour's place
 - Pure BSP: every split follows its ratio, whatever size the windows would rather have. A window that will not shrink to its slot sticks out of it, and never takes room from the others
+- Your commands never put a window over another: a resize (keys or mouse) stops where a window was seen to go no smaller, and a swap or warp that would squeeze one refuses; the window in the way flashes. Only that window's own behaviour counts, forgotten when it closes
 - Drag a window onto another to swap them, resize with the mouse
 - Hold `alt` to move or resize a window from anywhere on it
 - Hold a second key while dropping to split the window under it instead of swapping

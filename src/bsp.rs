@@ -144,6 +144,44 @@ impl BspTree {
         out
     }
 
+    /// The tree part of the way from `self` to `to`, which must have the
+    /// same windows in the same splits: every ratio `t` of the way (0 is
+    /// `self`, 1 is `to`). `None` if the two trees differ otherwise.
+    pub fn interpolate(&self, to: &BspTree, t: f32) -> Option<BspTree> {
+        fn rec(a: &Node, b: &Node, t: f32) -> Option<Node> {
+            match (a, b) {
+                (Node::Leaf(x), Node::Leaf(y)) if x == y => Some(Node::Leaf(*x)),
+                (
+                    Node::Split {
+                        split: s1,
+                        ratio: r1,
+                        a: a1,
+                        b: b1,
+                    },
+                    Node::Split {
+                        split: s2,
+                        ratio: r2,
+                        a: a2,
+                        b: b2,
+                    },
+                ) if s1 == s2 => Some(Node::Split {
+                    split: *s1,
+                    ratio: r1 + (r2 - r1) * t,
+                    a: Box::new(rec(a1, a2, t)?),
+                    b: Box::new(rec(b1, b2, t)?),
+                }),
+                _ => None,
+            }
+        }
+        match (&self.root, &to.root) {
+            (Some(a), Some(b)) => Some(BspTree {
+                root: Some(rec(a, b, t)?),
+            }),
+            (None, None) => Some(BspTree::new()),
+            _ => None,
+        }
+    }
+
     /// Computes the frame of every window inside `area`: each split gives
     /// its first half its ratio of the room, whatever the windows in it
     /// would rather have.
@@ -795,5 +833,18 @@ mod tests {
         assert_eq!(t.windows(), vec![5, 7, 9]);
         t.swap(5, 9);
         assert_eq!(t.windows(), vec![9, 7, 5]);
+    }
+    #[test]
+    fn interpolates_ratios_between_trees_of_one_shape() {
+        let a = tree(&[1, 2, 3]);
+        let mut b = a.clone();
+        b.resize(1, Direction::Right, 0.2);
+        let half = a.interpolate(&b, 0.5).unwrap();
+        let w = |t: &BspTree| t.layout(AREA, GAP)[0].1.w;
+        assert!(w(&a) < w(&half) && w(&half) < w(&b));
+        assert_eq!(a.interpolate(&b, 0.0).unwrap(), a);
+        let mut other = a.clone();
+        other.swap(1, 2);
+        assert!(a.interpolate(&other, 0.5).is_none(), "windows moved");
     }
 }
