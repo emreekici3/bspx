@@ -51,8 +51,6 @@ pub struct Manager<B: Backend> {
     /// them; they only stop a command (a resize, a warp, a swap) from
     /// putting the window over another.
     min_sizes: MinSizes,
-    /// When the highlight on the window that stopped a command goes away.
-    flash_until: Option<(f64, Overlay)>,
     /// The layout before the user's latest run of resizes, and when the
     /// last of them was. A window seen to refuse its size right after one
     /// stops that resize where it fits: the first time bspx learns a
@@ -160,9 +158,6 @@ const MIN_SIZE_THRESHOLD: i32 = 24;
 /// The smallest width and height each window was seen to accept.
 type MinSizes = HashMap<WinId, (i32, i32)>;
 
-/// How long the window that stopped a command is highlighted.
-const FLASH_SECS: f64 = 0.3;
-
 /// The user's latest run of resizes: the layout before the first, when the
 /// last was, and, when they were all key presses for one window and one
 /// direction, which and how far in all.
@@ -195,7 +190,6 @@ impl<B: Backend> Manager<B> {
             closed: HashSet::new(),
             focused: None,
             min_sizes: MinSizes::new(),
-            flash_until: None,
             resize_anchor: None,
             shown_overlay: None,
             reported_focus: None,
@@ -580,7 +574,7 @@ impl<B: Backend> Manager<B> {
         {
             let now = self.tree.clone();
             let (area, gap) = (self.inner_area(), self.config.gap);
-            let (tree, stopper) = match run.keys {
+            let (tree, _) = match run.keys {
                 // The same keys, pressed less far.
                 Some((win, dir, total)) => self.limited_by(&run.before, &now, |t| {
                     let mut tree = run.before.clone();
@@ -592,9 +586,6 @@ impl<B: Backend> Manager<B> {
                 debug!("the last resize went past what a window accepts; it stops there");
                 self.tree = tree;
                 dirty = true;
-            }
-            if let Some(w) = stopper {
-                self.flash(w);
             }
         }
 
@@ -816,20 +807,6 @@ impl<B: Backend> Manager<B> {
         }
         let tree = step(fits).unwrap_or_else(|| before.clone());
         (tree, Some(stopper))
-    }
-
-    /// Highlights window `id` for a moment: it is why a command stopped.
-    fn flash(&mut self, id: WinId) {
-        let Some(rect) = self.frames.get(&id).copied() else {
-            return;
-        };
-        let overlay = Overlay {
-            rect,
-            above: id,
-            color: self.config.drag_color,
-        };
-        self.set_overlay(Some(overlay));
-        self.flash_until = Some((self.clock + FLASH_SECS, overlay));
     }
 
     /// Reacts to window events, the only way bspx learns that something
@@ -1523,11 +1500,7 @@ impl<B: Backend> Manager<B> {
                         );
                     }
                     // No further than the windows there accept.
-                    let (tree, stopper) = self.limited(&unchanged, self.tree.clone());
-                    self.tree = tree;
-                    if let Some(w) = stopper {
-                        self.flash(w);
-                    }
+                    (self.tree, _) = self.limited(&unchanged, self.tree.clone());
                     self.relayout_now();
                 } else {
                     let prev = self.frames.get(&grab.win).copied().unwrap_or(f);
@@ -1596,7 +1569,6 @@ impl<B: Backend> Manager<B> {
                 }
                 if let Some(w) = self.squeezed(&self.tree, &tree) {
                     info!("window {w} would not fit; window {} goes back", grab.win);
-                    self.flash(w);
                 } else {
                     match grab.side {
                         Some(side) => info!("putting window {} {side:?} of {other}", grab.win),
@@ -1694,7 +1666,6 @@ impl<B: Backend> Manager<B> {
                         tree.swap(win, other);
                         if let Some(w) = self.squeezed(&self.tree, &tree) {
                             info!("window {w} would not fit; window {win} goes back");
-                            self.flash(w);
                         } else {
                             info!("swapping window {win} with {other}");
                             self.tree = tree;
@@ -1770,11 +1741,7 @@ impl<B: Backend> Manager<B> {
         if off(after.y, before.y) {
             self.tree.set_border(id, Up, after.y - gap, area, gap);
         }
-        let (tree, stopper) = self.limited(&unchanged, self.tree.clone());
-        self.tree = tree;
-        if let Some(w) = stopper {
-            self.flash(w);
-        }
+        (self.tree, _) = self.limited(&unchanged, self.tree.clone());
         debug!("window {id} resized by mouse");
         true
     }
@@ -1782,14 +1749,6 @@ impl<B: Backend> Manager<B> {
     /// Advances animations by `dt` seconds and pushes the new frames.
     pub fn tick(&mut self, dt: f64) {
         self.clock += dt;
-        if let Some((until, overlay)) = self.flash_until
-            && self.clock >= until
-        {
-            self.flash_until = None;
-            if self.shown_overlay == Some(overlay) {
-                self.set_overlay(None);
-            }
-        }
         let mut moves = self.anim.step(dt);
         // Windows making room go first: a window that grows into the space
         // a neighbour has not left yet would cover it for a frame.
@@ -1951,7 +1910,6 @@ impl<B: Backend> Manager<B> {
                 let mut tree = self.tree.clone();
                 tree.swap(from, to);
                 if let Some(w) = self.squeezed(&self.tree, &tree) {
-                    self.flash(w);
                     return Err(format!("window {w} would not fit there"));
                 }
                 self.tree = tree;
@@ -2007,7 +1965,6 @@ impl<B: Backend> Manager<B> {
                     tree.swap(from, to);
                 }
                 if let Some(w) = self.squeezed(&self.tree, &tree) {
-                    self.flash(w);
                     return Err(format!("window {w} would not fit there"));
                 }
                 if self.zoomed.is_some_and(|(w, _)| w == from || w == to) {
@@ -2037,9 +1994,6 @@ impl<B: Backend> Manager<B> {
                 let after = self.tree.clone();
                 let (tree, stopper) = self.limited_by(&unchanged, &after, step);
                 self.tree = tree;
-                if let Some(w) = stopper {
-                    self.flash(w);
-                }
                 if self.slots() == before {
                     self.tree = unchanged;
                     return Err(match stopper {
@@ -4826,7 +4780,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_window_that_stops_a_resize_is_highlighted_for_a_moment() {
+    fn the_window_that_stops_a_resize_is_not_highlighted() {
         let mut m = claude_left_terminal_right();
         for _ in 0..12 {
             let _ = m.execute(&Command::Resize(Direction::Left, Some(0.05)));
@@ -4836,9 +4790,7 @@ pub(crate) mod tests {
             m.execute(&Command::Resize(Direction::Left, Some(0.05)))
                 .is_err()
         );
-        assert_eq!(m.backend().overlay.map(|o| o.above), Some(1));
-        m.tick(0.5);
-        assert_eq!(m.backend().overlay, None);
+        assert_eq!(m.backend().overlay_changes, 0);
     }
 
     #[test]
@@ -4883,7 +4835,7 @@ pub(crate) mod tests {
             Err("window 1 would not fit there".into())
         );
         assert_eq!(m.tree(), &before);
-        assert_eq!(m.backend().overlay.map(|o| o.above), Some(1));
+        assert_eq!(m.backend().overlay_changes, 0);
         // Window 3 warped into window 1's place would halve window 1.
         m.backend.focused = Some(3);
         m.refresh();
