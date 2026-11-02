@@ -205,6 +205,17 @@ impl<B: Backend> Manager<B> {
         &self.config
     }
 
+    /// How long an animation frame lasts: one refresh of the display (120
+    /// frames a second on ProMotion, 60 elsewhere; 120 if unknown).
+    pub fn frame_interval(&mut self) -> std::time::Duration {
+        let rate = self
+            .backend
+            .frame_rate()
+            .unwrap_or(120.0)
+            .clamp(30.0, 240.0);
+        std::time::Duration::from_secs_f64(1.0 / rate)
+    }
+
     pub fn is_animating(&self) -> bool {
         !self.anim.is_idle()
     }
@@ -1627,6 +1638,8 @@ pub(crate) mod tests {
         pub sticky: HashSet<WinId>,
         /// Windows fading out as they close: still listed, not on screen.
         pub fading: HashSet<WinId>,
+        /// The display's refresh rate, if known.
+        pub frame_rate: Option<f64>,
     }
 
     impl MockBackend {
@@ -1743,6 +1756,9 @@ pub(crate) mod tests {
         fn show_overlay(&mut self, overlay: Option<Overlay>) {
             self.overlay = overlay;
             self.overlay_changes += 1;
+        }
+        fn frame_rate(&mut self) -> Option<f64> {
+            self.frame_rate
         }
         fn animate_frame(&mut self, id: WinId, frame: Rect, _prev: Rect) {
             self.set_frame(id, frame);
@@ -3741,5 +3757,20 @@ pub(crate) mod tests {
         m.backend.fading.insert(2);
         m.refresh();
         assert_eq!(m.tree().windows(), vec![1], "no wait for the fade");
+    }
+    #[test]
+    fn animation_frames_follow_the_display() {
+        let mut m = manager(12.0);
+        let ms = |m: &mut Manager<MockBackend>| m.frame_interval().as_secs_f64() * 1000.0;
+        assert!(
+            (ms(&mut m) - 8.33).abs() < 0.01,
+            "120 a second when unknown"
+        );
+        m.backend.frame_rate = Some(60.0);
+        assert!((ms(&mut m) - 16.67).abs() < 0.01);
+        m.backend.frame_rate = Some(120.0);
+        assert!((ms(&mut m) - 8.33).abs() < 0.01);
+        m.backend.frame_rate = Some(1000.0);
+        assert!((ms(&mut m) - 4.17).abs() < 0.01, "no faster than 240");
     }
 }

@@ -93,6 +93,11 @@ pub trait Backend {
     /// Lets the platform UI (the overlay window) process its events. Called
     /// once per frame.
     fn pump(&mut self) {}
+    /// The display's highest refresh rate, in frames per second, to pace
+    /// animations to; `None` if unknown.
+    fn frame_rate(&mut self) -> Option<f64> {
+        None
+    }
     /// Whether the backend is still waiting for something it saw to settle
     /// (a new window whose Accessibility element is not there yet, an app
     /// still starting up) and wants another look soon, events or not.

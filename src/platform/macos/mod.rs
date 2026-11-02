@@ -7,6 +7,7 @@ mod ffi;
 mod hotkeys;
 mod overlay;
 mod tap;
+mod writer;
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, c_char, c_void};
@@ -169,6 +170,26 @@ fn copy_attr(element: AXUIElementRef, attr: &Cf) -> Option<Cf> {
     } else {
         None
     }
+}
+
+/// Where the app says a window is: its AX position and size attributes,
+/// named `position` and `size`.
+fn read_frame(element: AXUIElementRef, position: &Cf, size: &Cf) -> Option<Rect> {
+    let mut point = CGPoint::default();
+    let mut dims = CGSize::default();
+    unsafe {
+        let pos = copy_attr(element, position)?;
+        let sz = copy_attr(element, size)?;
+        if AXValueGetValue(pos.ptr(), kAXValueTypeCGPoint, (&raw mut point).cast()) == 0
+            || AXValueGetValue(sz.ptr(), kAXValueTypeCGSize, (&raw mut dims).cast()) == 0
+        {
+            return None;
+        }
+    }
+    Some(cg_to_rect(CGRect {
+        origin: point,
+        size: dims,
+    }))
 }
 
 fn set_attr(element: AXUIElementRef, attr: &Cf, value: CFTypeRef) -> bool {
@@ -852,6 +873,10 @@ pub struct MacBackend {
     connection: i32,
     /// Created the first time a drop target is highlighted.
     overlay: Option<OverlayWindow>,
+    /// Write the frames, a thread per app.
+    writers: writer::Writers,
+    /// The main display's highest refresh rate, frames per second.
+    frame_rate: Option<f64>,
     dock: DockApi,
     focuser: FocusApi,
     space_api: SpaceApi,
@@ -882,6 +907,8 @@ impl MacBackend {
             alive: HashSet::new(),
             connection: unsafe { CGSMainConnectionID() },
             overlay: None,
+            writers: writer::Writers::default(),
+            frame_rate: None,
             dock: DockApi::new(),
             focuser: FocusApi::new(),
             space_api: SpaceApi::new(),
@@ -1039,69 +1066,35 @@ impl MacBackend {
 }
 
 impl MacBackend {
-    /// Writes `frame` to window `id` in the order of `steps`: one AX call
-    /// each, so the window spends a moment at every step in between.
-    fn write_frame(&mut self, id: WinId, frame: Rect, steps: &[Step]) {
+    /// Has `frame` written to window `id` in the order of `steps`, by the
+    /// window's app's writer thread. `last`: the window stays there (the
+    /// end of an animation, or a frame set at once).
+    fn write_frame(&mut self, id: WinId, frame: Rect, steps: &[Step], last: bool) {
         if steps.is_empty() {
             return;
         }
         let Some(win) = self.windows.get(&id) else {
             return;
         };
-        let element = win.element.ptr();
-        let point = CGPoint {
-            x: f64::from(frame.x),
-            y: f64::from(frame.y),
+        let Some(element) = Cf::retained(win.element.ptr()) else {
+            return;
         };
-        let size = CGSize {
-            width: f64::from(frame.w),
-            height: f64::from(frame.h),
-        };
-        let write = |step: Step| unsafe {
-            let value = match step {
-                Step::Position => AXValueCreate(kAXValueTypeCGPoint, (&raw const point).cast()),
-                Step::Size => AXValueCreate(kAXValueTypeCGSize, (&raw const size).cast()),
-            };
-            if let Some(v) = Cf::owned(value) {
-                let name = match step {
-                    Step::Position => &self.names.position,
-                    Step::Size => &self.names.size,
-                };
-                set_attr(element, name, v.ptr());
-            }
-        };
+        let pid = win.pid;
         // `bspx config log_level debug` traces every write: where the window
         // was asked to go, and where the app put it after the first call and
         // at the end.
         let trace = log::log_enabled!(target: "bspx::frames", log::Level::Debug);
-        write(steps[0]);
-        let mid = trace.then(|| self.ax_frame(element)).flatten();
-        for &step in &steps[1..] {
-            write(step);
-        }
-        if trace {
-            let edges = |r: Option<Rect>| {
-                r.map_or_else(
-                    || "?".to_string(),
-                    |r| format!("{}..{} w{}", r.x, r.max_x(), r.w),
-                )
-            };
-            let order: Vec<&str> = steps
-                .iter()
-                .map(|s| match s {
-                    Step::Position => "pos",
-                    Step::Size => "size",
-                })
-                .collect();
-            log::debug!(
-                target: "bspx::frames",
-                "window {id} {}: want {} | between {} | after {}",
-                order.join(","),
-                edges(Some(frame)),
-                edges(mid),
-                edges(self.ax_frame(element)),
-            );
-        }
+        self.writers.send(
+            pid,
+            writer::Job {
+                id,
+                element,
+                frame,
+                steps: steps.to_vec(),
+                last,
+                trace,
+            },
+        );
     }
 
     /// The writes that put a window at its final frame. As in yabai: macOS
@@ -1122,21 +1115,7 @@ impl MacBackend {
 
     /// Where the app says the window is, from its Accessibility element.
     fn ax_frame(&self, element: AXUIElementRef) -> Option<Rect> {
-        let mut point = CGPoint::default();
-        let mut size = CGSize::default();
-        unsafe {
-            let pos = copy_attr(element, &self.names.position)?;
-            let sz = copy_attr(element, &self.names.size)?;
-            if AXValueGetValue(pos.ptr(), kAXValueTypeCGPoint, (&raw mut point).cast()) == 0
-                || AXValueGetValue(sz.ptr(), kAXValueTypeCGSize, (&raw mut size).cast()) == 0
-            {
-                return None;
-            }
-        }
-        Some(cg_to_rect(CGRect {
-            origin: point,
-            size,
-        }))
+        read_frame(element, &self.names.position, &self.names.size)
     }
 }
 
@@ -1151,6 +1130,10 @@ impl Backend for MacBackend {
     }
 
     fn windows(&mut self) -> Vec<WindowInfo> {
+        // Windows just sent to where they stay must be read there, not a
+        // frame or two before (they would be sent back to where they were).
+        self.writers
+            .wait_for_last_frames(std::time::Duration::from_millis(100));
         let cg = cg_windows(true);
         let all = cg_windows(false);
         let present: HashSet<WinId> = cg.iter().map(|w| w.id).collect();
@@ -1167,6 +1150,7 @@ impl Backend for MacBackend {
         // An app is watched for as long as it runs, windows or not: with no
         // polling, a window it opens later is only seen through its observer.
         self.apps.retain(|pid, _| process_alive(*pid));
+        self.writers.retain(process_alive);
         if events::take_rescan() {
             self.watch_running_apps();
         }
@@ -1221,6 +1205,11 @@ impl Backend for MacBackend {
     fn tiling_area(&mut self) -> Rect {
         let full = cg_to_rect(unsafe { CGDisplayBounds(CGMainDisplayID()) });
         self.display = full;
+        let rate = events::main_screen_frame_rate();
+        if rate != self.frame_rate {
+            info!("animating at {} frames a second", rate.unwrap_or(120.0));
+            self.frame_rate = rate;
+        }
         let visible = primary_screen_area().unwrap_or_else(|| {
             warn!("NSScreen unavailable; assuming a 25pt menu bar");
             Rect::new(full.x, full.y + 25, full.w, full.h - 25)
@@ -1239,7 +1228,7 @@ impl Backend for MacBackend {
     }
 
     fn set_frame(&mut self, id: WinId, frame: Rect) {
-        self.write_frame(id, frame, &[Step::Size, Step::Position, Step::Size]);
+        self.write_frame(id, frame, &[Step::Size, Step::Position, Step::Size], true);
     }
 
     fn animate_frame(&mut self, id: WinId, frame: Rect, prev: Rect) {
@@ -1257,11 +1246,11 @@ impl Backend for MacBackend {
                 Step::Size => resized,
             })
             .collect();
-        self.write_frame(id, frame, &steps);
+        self.write_frame(id, frame, &steps, false);
     }
 
     fn update_frame(&mut self, id: WinId, frame: Rect, prev: Rect) {
-        self.write_frame(id, frame, &Self::settle_steps(frame, prev));
+        self.write_frame(id, frame, &Self::settle_steps(frame, prev), true);
     }
 
     fn active_space(&mut self) -> u64 {
@@ -1434,6 +1423,10 @@ impl Backend for MacBackend {
         if let Some(w) = &mut self.overlay {
             w.pump();
         }
+    }
+
+    fn frame_rate(&mut self) -> Option<f64> {
+        self.frame_rate
     }
 
     fn wants_another_look(&mut self) -> bool {

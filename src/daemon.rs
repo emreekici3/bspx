@@ -14,9 +14,8 @@ use crate::ipc::Server;
 use crate::manager::Manager;
 use crate::platform::Backend;
 
-/// Frame interval while something is moving (120 fps; ProMotion friendly).
-const ACTIVE_FRAME: Duration = Duration::from_micros(8_333);
-/// Loop interval when nothing is moving.
+/// Loop interval when nothing is moving. While something is, the loop
+/// runs at the display's refresh rate (`Manager::frame_interval`).
 const IDLE_FRAME: Duration = Duration::from_millis(16);
 /// Work that takes longer than this is logged (at debug level), to find
 /// what keeps the layout waiting.
@@ -210,9 +209,10 @@ pub fn run<B: Backend>(
         }
 
         // Sleep only what is left of the frame, so frames stay evenly spaced
-        // however long this one's work (mostly Accessibility calls) took.
+        // however long this one's work took. The windows are written by
+        // their apps' own threads, so a slow app does not make it late.
         let interval = if manager.is_animating() {
-            ACTIVE_FRAME
+            manager.frame_interval()
         } else {
             IDLE_FRAME
         };

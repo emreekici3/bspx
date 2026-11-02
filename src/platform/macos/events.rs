@@ -177,3 +177,25 @@ pub fn running_app_pids() -> Vec<i32> {
     }
     pids
 }
+
+/// The highest refresh rate of the main display, in frames per second:
+/// 120 for a ProMotion display, usually 60 otherwise. `None` before
+/// macOS 12, which does not say.
+pub fn main_screen_frame_rate() -> Option<f64> {
+    unsafe {
+        let pool = objc_autoreleasePoolPush();
+        let screen: Id = msg!(objc_getClass(c"NSScreen".as_ptr()), "mainScreen"; -> Id);
+        let rate = if screen.is_null() {
+            None
+        } else {
+            let known: i8 =
+                msg!(screen, "respondsToSelector:", sel(c"maximumFramesPerSecond") => Sel; -> i8);
+            (known != 0)
+                .then(|| msg!(screen, "maximumFramesPerSecond"; -> isize))
+                .filter(|fps| *fps > 0)
+                .map(|fps| fps as f64)
+        };
+        objc_autoreleasePoolPop(pool);
+        rate
+    }
+}
