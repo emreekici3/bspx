@@ -12,6 +12,15 @@ pub enum Zoom {
     Parent,
 }
 
+/// Which display `bspx send-display` means. Displays are numbered from 1,
+/// left to right.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DisplayTarget {
+    Next,
+    Prev,
+    Number(usize),
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
     /// Focus the neighbouring window.
@@ -61,6 +70,8 @@ pub enum Command {
     Label(Option<(usize, String)>),
     /// Move the focused window to a Space, by number or label.
     Send(String),
+    /// Move the focused window into another display's layout.
+    SendDisplay(DisplayTarget),
     /// Switch to a Space, by number or label.
     Space(String),
     /// Tile a Space's windows (`float: false`) or leave them alone.
@@ -87,6 +98,7 @@ commands:
   space <space>                            switch to a Space
   layout <space> <bsp|float>               tile a Space, or leave its windows be
   send <space>                             move the focused window to a Space
+  send-display <next|prev|n>               move the focused window to another display
   retile | reload | query | quit
 
 settings (put these in ~/.config/bspx/bspxrc):
@@ -172,6 +184,22 @@ impl Command {
                     .ok_or("send: missing Space number or label")?
                     .to_string(),
             ),
+            Some("send-display") => {
+                let w = words
+                    .get(1)
+                    .ok_or("send-display: missing next, prev or a display number")?;
+                if words.len() > 2 {
+                    return Err("send-display takes one argument".into());
+                }
+                Command::SendDisplay(match *w {
+                    "next" => DisplayTarget::Next,
+                    "prev" => DisplayTarget::Prev,
+                    n => match n.parse::<usize>() {
+                        Ok(n) if n >= 1 => DisplayTarget::Number(n),
+                        _ => return Err(format!("unknown display '{n}'")),
+                    },
+                })
+            }
             Some("space") => Command::Space(
                 words
                     .get(1)
@@ -258,6 +286,7 @@ impl Command {
             | Command::BalanceArea
             | Command::Zoom(_)
             | Command::Send(_)
+            | Command::SendDisplay(_)
             | Command::Space(_) => 2,
             Command::Resize(..) | Command::Label(_) | Command::Layout { .. } => 3,
             _ => 1,
@@ -370,6 +399,17 @@ mod tests {
         assert!(Command::parse("layout 3").is_err());
         assert!(Command::parse("layout 3 stack").is_err());
         assert!(Command::parse("send").is_err());
+        assert!(Command::parse("send-display").is_err());
+        assert!(Command::parse("send-display 0").is_err());
+        assert!(Command::parse("send-display left").is_err());
+        assert_eq!(
+            Command::parse("send-display next"),
+            Ok(Command::SendDisplay(DisplayTarget::Next))
+        );
+        assert_eq!(
+            Command::parse("send-display 2"),
+            Ok(Command::SendDisplay(DisplayTarget::Number(2)))
+        );
         assert!(Command::parse("send 1 2").is_err());
     }
 

@@ -605,6 +605,47 @@ impl SpaceApi {
         }
     }
 
+    /// The desktops (not full-screen apps) of every display, in the window
+    /// server's order of the displays, each in Mission Control order.
+    fn by_display(&self, cid: i32) -> Vec<Vec<u64>> {
+        let Some(list) = self.list else {
+            return Vec::new();
+        };
+        unsafe {
+            let Some(displays) = Cf::owned(list(cid)) else {
+                return Vec::new();
+            };
+            (0..CFArrayGetCount(displays.ptr()))
+                .map(|i| self.desktops(CFArrayGetValueAtIndex(displays.ptr(), i)))
+                .collect()
+        }
+    }
+
+    /// The desktops of one display's entry in the window server's list.
+    unsafe fn desktops(&self, dict: CFTypeRef) -> Vec<u64> {
+        let mut out = Vec::new();
+        unsafe {
+            let spaces = CFDictionaryGetValue(dict, self.spaces_key.ptr());
+            if spaces.is_null() || CFGetTypeID(spaces) != CFArrayGetTypeID() {
+                return out;
+            }
+            for i in 0..CFArrayGetCount(spaces) {
+                let space = CFArrayGetValueAtIndex(spaces, i);
+                if space.is_null() || CFGetTypeID(space) != CFDictionaryGetTypeID() {
+                    continue;
+                }
+                let kind = i64_value(CFDictionaryGetValue(space, self.type_key.ptr()));
+                if kind.unwrap_or(0) != 0 {
+                    continue; // a full-screen app
+                }
+                if let Some(id) = i64_value(CFDictionaryGetValue(space, self.id_key.ptr())) {
+                    out.push(id as u64);
+                }
+            }
+        }
+        out
+    }
+
     /// The desktops (not full-screen apps) of the display named `display`
     /// (or of the first one), in Mission Control order.
     fn spaces(&self, cid: i32, display: Option<&str>) -> Vec<u64> {
@@ -627,23 +668,7 @@ impl SpaceApi {
             let Some(dict) = chosen else {
                 return out;
             };
-            let spaces = CFDictionaryGetValue(dict, self.spaces_key.ptr());
-            if spaces.is_null() || CFGetTypeID(spaces) != CFArrayGetTypeID() {
-                return out;
-            }
-            for i in 0..CFArrayGetCount(spaces) {
-                let space = CFArrayGetValueAtIndex(spaces, i);
-                if space.is_null() || CFGetTypeID(space) != CFDictionaryGetTypeID() {
-                    continue;
-                }
-                let kind = i64_value(CFDictionaryGetValue(space, self.type_key.ptr()));
-                if kind.unwrap_or(0) != 0 {
-                    continue; // a full-screen app
-                }
-                if let Some(id) = i64_value(CFDictionaryGetValue(space, self.id_key.ptr())) {
-                    out.push(id as u64);
-                }
-            }
+            out = self.desktops(dict);
         }
         out
     }
@@ -684,12 +709,11 @@ impl MacBackend {
     /// switching there with the keyboard shortcut. The user ends up there
     /// too; if the window does not come along, they are taken back.
     fn carry(&mut self, id: WinId, space: u64) -> bool {
-        let spaces = self.spaces();
-        let Some(n) = spaces.iter().position(|s| *s == space).map(|i| i + 1) else {
+        let Some(n) = self.desktop_number(space) else {
             return false;
         };
-        let here = self.active_space();
-        let from = spaces.iter().position(|s| *s == here).map(|i| i + 1);
+        let here = self.window_spaces(&[id]).get(&id).copied();
+        let from = here.and_then(|s| self.desktop_number(s));
         let Some(pid) = self.windows.get(&id).map(|w| w.pid) else {
             return false;
         };
@@ -704,14 +728,33 @@ impl MacBackend {
             Ok(()) => true,
             Err(e) => {
                 warn!("{e}");
-                if let Some(from) = from
-                    && self.active_space() != here
-                {
+                // Back to the desktop the window is still on (a no-op if
+                // the switch never happened).
+                if let Some(from) = from {
                     let _ = desktop::switch(from);
                 }
                 false
             }
         }
+    }
+}
+
+impl MacBackend {
+    /// The number of the *Switch to Desktop N* shortcut for `space`. macOS
+    /// numbers desktops on from one display to the next: with two on the
+    /// first display, the second display's first is Desktop 3.
+    fn desktop_number(&self, space: u64) -> Option<usize> {
+        let n = self
+            .space_api
+            .by_display(self.connection)
+            .into_iter()
+            .flatten()
+            .position(|s| s == space)
+            .map(|i| i + 1);
+        if n.is_none() {
+            warn!("Space {space} is not among the desktops");
+        }
+        n
     }
 }
 
@@ -1450,6 +1493,20 @@ impl Backend for MacBackend {
     }
 
     fn switch_to_space(&mut self, n: usize) -> Result<(), String> {
+        desktop::switch(n)
+    }
+
+    fn display_spaces(&mut self, shown: u64) -> Vec<u64> {
+        self.space_api
+            .by_display(self.connection)
+            .into_iter()
+            .find(|spaces| spaces.contains(&shown))
+            .unwrap_or_else(|| self.spaces())
+    }
+
+    fn show_space(&mut self, space: u64) -> Result<(), String> {
+        let n = self.desktop_number(space).ok_or("no such Space")?;
+        debug!("showing Space {space}: Desktop {n}");
         desktop::switch(n)
     }
 

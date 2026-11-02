@@ -6,7 +6,7 @@ use log::{debug, info, warn};
 
 use crate::anim::Animator;
 use crate::bsp::{self, BspTree, WinId};
-use crate::command::{Command, Zoom};
+use crate::command::{Command, DisplayTarget, Zoom};
 use crate::config::{Config, MouseAction, app_matches};
 use crate::geometry::{Direction, Rect};
 use crate::platform::{Backend, Display, Modifier, MouseButton, Overlay, WindowEvent, WindowInfo};
@@ -105,10 +105,12 @@ enum Drag {
     /// The button went down over a tiled window; it may be moved or resized.
     Pressed(WinId),
     /// The window is being moved by its title bar. `target` is the window
-    /// under the pointer, which it would swap with if dropped now.
+    /// under the pointer, which it would swap with if dropped now, or split
+    /// on `side` (a window on another display).
     Moving {
         win: WinId,
         target: Option<WinId>,
+        side: Option<Direction>,
     },
     /// Something else (a resize, a click, a drag outside tiled windows).
     Other,
@@ -641,31 +643,39 @@ impl<B: Backend> Manager<B> {
         self.tree.insert(id, target, inner, gap, ratio);
     }
 
-    /// The ids of the Spaces set to float.
+    /// The ids of the Spaces set to float. Space numbers count on each
+    /// display, so Space 2 set to float is the second of every display.
     fn float_space_ids(&mut self) -> HashSet<u64> {
         if self.config.float_spaces.is_empty() {
             return HashSet::new();
         }
-        let spaces = self.backend.spaces();
-        self.config
+        let numbers: Vec<usize> = self
+            .config
             .float_spaces
             .iter()
             .filter_map(|s| self.config.space_number(s))
-            .filter_map(|n| spaces.get(n - 1).copied())
-            .collect()
+            .collect();
+        let mut out = HashSet::new();
+        for shown in self.shown_spaces() {
+            let spaces = self.backend.display_spaces(shown);
+            out.extend(numbers.iter().filter_map(|n| spaces.get(n - 1).copied()));
+        }
+        out
     }
 
-    /// The Space number and id `space` (a number or a label) stands for.
+    /// The Space number and id `space` (a number or a label) stands for, on
+    /// the current display: Spaces are numbered from 1 on each display.
     fn resolve_space(&mut self, space: &str) -> Result<(usize, u64), String> {
         let n = self
             .config
             .space_number(space)
             .ok_or_else(|| format!("no Space is labelled '{space}'"))?;
+        let current = self.current_space();
         let id = *self
             .backend
-            .spaces()
+            .display_spaces(current)
             .get(n - 1)
-            .ok_or_else(|| format!("there is no Space {n}"))?;
+            .ok_or_else(|| format!("there is no Space {n} on this display"))?;
         Ok((n, id))
     }
 
@@ -914,6 +924,16 @@ impl<B: Backend> Manager<B> {
         self.area = self.display_area(space);
     }
 
+    /// The Space of the current display: the one with the focused window
+    /// (before bspx has first looked, the main display's).
+    fn current_space(&mut self) -> u64 {
+        if self.displays.is_empty() {
+            self.backend.active_space()
+        } else {
+            self.active_space
+        }
+    }
+
     /// The Spaces the displays show, the main display's first. Never empty
     /// once bspx has looked: before that, the current Space.
     fn shown_spaces(&self) -> Vec<u64> {
@@ -1046,6 +1066,26 @@ impl<B: Backend> Manager<B> {
             .position(|d| d.space == self.active_space)?;
         let next = bsp::neighbor(&frames, here as WinId, dir)?;
         self.displays.get(next as usize).map(|d| d.space)
+    }
+
+    /// The Space shown on the display `target` names: the next or previous
+    /// one, or one by number, counting from 1 left to right (top to bottom
+    /// where two are one above the other).
+    fn resolve_display(&self, target: DisplayTarget) -> Result<u64, String> {
+        let mut order: Vec<&Display> = self.displays.iter().collect();
+        order.sort_by_key(|d| (d.frame.x, d.frame.y));
+        let count = order.len();
+        let here = order
+            .iter()
+            .position(|d| d.space == self.active_space)
+            .unwrap_or(0);
+        let i = match target {
+            DisplayTarget::Next => (here + 1) % count,
+            DisplayTarget::Prev => (here + count - 1) % count,
+            DisplayTarget::Number(n) if n <= count => n - 1,
+            DisplayTarget::Number(n) => return Err(format!("there is no display {n}")),
+        };
+        Ok(order[i].space)
     }
 
     /// The Space of the display at a point, if it is on another display
@@ -1335,16 +1375,20 @@ impl<B: Backend> Manager<B> {
                     self.drag = Drag::Other; // a resize
                 } else if off(now.x, before.x) || off(now.y, before.y) {
                     debug!("window {win} is being moved");
-                    self.drag = Drag::Moving { win, target: None };
+                    self.drag = Drag::Moving {
+                        win,
+                        target: None,
+                        side: None,
+                    };
                     self.dragging();
                 }
             }
-            Drag::Moving { win, target } => {
+            Drag::Moving { win, target, side } => {
                 let Some(cursor) = self.backend.cursor() else {
                     return;
                 };
-                let target = self.show_drop_target(win, (target, None), cursor, false).0;
-                self.drag = Drag::Moving { win, target };
+                let (target, side) = self.show_drop_target(win, (target, side), cursor, false);
+                self.drag = Drag::Moving { win, target, side };
             }
             Drag::None | Drag::Other | Drag::Gesture(_) => {}
         }
@@ -1595,6 +1639,9 @@ impl<B: Backend> Manager<B> {
             .filter(|(_, _, frame)| frame.contains_point(x, y))
             // Where frames overlap, the window whose slot it is wins.
             .max_by_key(|(_, slot, _)| slot.contains_point(x, y));
+        // A window carried to another display joins it, splitting the
+        // window there rather than trading places with it.
+        let insert = insert || under.is_some_and(|(id, _, _)| !self.tree.contains(id));
         let side = under
             .filter(|_| insert)
             .map(|(_, _, frame)| frame.nearest_side(x, y));
@@ -1626,7 +1673,7 @@ impl<B: Backend> Manager<B> {
 
     fn release(&mut self) {
         match std::mem::replace(&mut self.drag, Drag::None) {
-            Drag::Moving { win, target } => {
+            Drag::Moving { win, target, side } => {
                 self.set_overlay(None);
                 // Animate from where the user let go.
                 if let Some(now) = self.backend.window_frame(win) {
@@ -1635,7 +1682,9 @@ impl<B: Backend> Manager<B> {
                 let cursor = self.backend.cursor();
                 match target {
                     Some(other) if !self.tree.contains(other) => {
-                        self.exchange(win, other);
+                        if let Some(space) = self.tiled_space_of(other) {
+                            self.move_to_display(win, space, Some(other), side);
+                        }
                     }
                     None if let Some(space) = cursor.and_then(|c| self.other_display_at(c)) => {
                         self.move_to_display(win, space, None, None);
@@ -2121,8 +2170,8 @@ impl<B: Backend> Manager<B> {
                 return Ok(String::new());
             }
             Command::Label(None) => {
-                let spaces = self.backend.spaces();
-                let current = self.backend.active_space();
+                let current = self.current_space();
+                let spaces = self.backend.display_spaces(current);
                 let float_spaces = self.float_space_ids();
                 let mut out = String::new();
                 for (i, sid) in spaces.iter().enumerate() {
@@ -2178,6 +2227,17 @@ impl<B: Backend> Manager<B> {
                 }
                 return Ok(String::new());
             }
+            Command::SendDisplay(target) => {
+                let win = focused()?;
+                let space = self.resolve_display(target)?;
+                if space == self.active_space {
+                    return Err("the window is already on that display".into());
+                }
+                self.move_to_display(win, space, None, None);
+                self.relayout();
+                self.warp_to(win);
+                return Ok(String::new());
+            }
             Command::Layout { ref space, float } => {
                 let (n, _) = self.resolve_space(space)?;
                 self.config.set_float_space(space, float);
@@ -2186,9 +2246,9 @@ impl<B: Backend> Manager<B> {
                 self.refresh();
             }
             Command::Space(ref space) => {
-                let (n, sid) = self.resolve_space(space)?;
-                if sid != self.backend.active_space() {
-                    self.backend.switch_to_space(n)?;
+                let (_, sid) = self.resolve_space(space)?;
+                if sid != self.current_space() {
+                    self.backend.show_space(sid)?;
                 }
                 return Ok(String::new());
             }
@@ -2306,6 +2366,8 @@ pub(crate) mod tests {
         /// Displays with their Spaces; empty means one, `area` showing
         /// `active`.
         pub displays: Vec<Display>,
+        /// The Spaces of each display, in order; empty means `spaces`.
+        pub display_spaces: Vec<Vec<u64>>,
     }
 
     impl MockBackend {
@@ -2408,8 +2470,32 @@ pub(crate) mod tests {
             self.active = space;
             Ok(())
         }
+        fn display_spaces(&mut self, shown: u64) -> Vec<u64> {
+            self.display_spaces
+                .iter()
+                .find(|l| l.contains(&shown))
+                .cloned()
+                .unwrap_or_else(|| self.spaces())
+        }
+        fn show_space(&mut self, space: u64) -> Result<(), String> {
+            let Some(i) = self.display_spaces.iter().position(|l| l.contains(&space)) else {
+                let n = self
+                    .spaces()
+                    .iter()
+                    .position(|s| *s == space)
+                    .ok_or("no such Space")?;
+                return self.switch_to_space(n + 1);
+            };
+            self.displays[i].space = space;
+            if i == 0 {
+                self.active = space;
+            }
+            Ok(())
+        }
         fn move_to_space(&mut self, id: WinId, space: u64) -> bool {
-            if !self.spaces().contains(&space) {
+            let known = self.spaces().contains(&space)
+                || self.display_spaces.iter().any(|l| l.contains(&space));
+            if !known {
                 return false;
             }
             self.space_of.insert(id, space);
@@ -3889,19 +3975,24 @@ pub(crate) mod tests {
         open_on(&mut m, 1, 10);
         open_on(&mut m, 2, 10);
         open_on(&mut m, 3, 20);
-        // Window 2 by its title bar, over window 3: they swap.
+        // Window 2 by its title bar, over the left of window 3: it splits
+        // window 3 (only a highlight of that half shows), leaving window 1
+        // alone on the main display.
         m.backend.cursor = (700.0, 35.0);
         m.backend.mouse = true;
         m.track_pointer();
-        m.backend.set_frame(2, Rect::new(1100, 200, 495, 600));
-        m.backend.cursor = (1300.0, 300.0);
+        m.backend.set_frame(2, Rect::new(1050, 200, 495, 600));
+        m.backend.cursor = (1100.0, 330.0);
         m.track_pointer();
-        assert_eq!(m.backend().overlay.unwrap().above, 3);
+        let overlay = m.backend().overlay.unwrap();
+        assert_eq!(overlay.above, 3);
+        assert_eq!(overlay.rect, SECOND.half(Direction::Left));
         m.backend.mouse = false;
         m.track_pointer();
         m.refresh();
-        assert_eq!(m.backend().frame(2), SECOND);
-        assert_eq!(m.backend().frame(3), Rect::new(505, 25, 495, 600));
+        assert_eq!(m.backend().frame(2), Rect::new(1000, 25, 395, 600));
+        assert_eq!(m.backend().frame(3), Rect::new(1405, 25, 395, 600));
+        assert_eq!(m.backend().frame(1), MAIN);
 
         // Window 1 onto a third display, empty: it moves there.
         m.backend.displays.push(Display {
@@ -3913,7 +4004,7 @@ pub(crate) mod tests {
         m.backend.cursor = (200.0, 35.0);
         m.backend.mouse = true;
         m.track_pointer();
-        m.backend.set_frame(1, Rect::new(-600, 200, 495, 600));
+        m.backend.set_frame(1, Rect::new(-600, 200, 1000, 600));
         m.backend.cursor = (-400.0, 300.0);
         m.track_pointer();
         assert_eq!(m.backend().overlay, None);
@@ -3921,7 +4012,61 @@ pub(crate) mod tests {
         m.track_pointer();
         m.refresh();
         assert_eq!(m.backend().frame(1), Rect::new(-800, 25, 800, 600));
-        assert_eq!(m.backend().frame(3), MAIN);
+        assert_eq!(m.backend().frame(2), Rect::new(1000, 25, 395, 600));
+    }
+
+    #[test]
+    fn send_display_moves_the_window_straight_there() {
+        let mut m = two_displays();
+        open_on(&mut m, 1, 10);
+        open_on(&mut m, 2, 10);
+        open_on(&mut m, 3, 20);
+        open_on(&mut m, 4, 20);
+        // From the far right of the second display to the first.
+        m.backend.focused = Some(4);
+        m.refresh();
+        m.execute(&Command::parse("send-display prev").unwrap())
+            .unwrap();
+        m.refresh();
+        assert_eq!(m.backend().frame(3), SECOND);
+        // It splits the window last focused there, tall: one above the other.
+        assert_eq!(m.backend().frame(4), Rect::new(505, 330, 495, 295));
+        assert_eq!(m.active_space(), 10);
+        m.execute(&Command::parse("send-display 2").unwrap())
+            .unwrap();
+        m.refresh();
+        assert_eq!(m.backend().frame(4).w, 395);
+        assert!(
+            m.execute(&Command::parse("send-display 2").unwrap())
+                .is_err()
+        );
+        assert!(
+            m.execute(&Command::parse("send-display 3").unwrap())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn spaces_are_numbered_on_the_display_of_the_focused_window() {
+        let mut m = two_displays();
+        m.backend.display_spaces = vec![vec![10, 11], vec![20, 21, 22]];
+        m.execute(&Command::parse("label 1 mail").unwrap()).unwrap();
+        open_on(&mut m, 1, 10);
+        open_on(&mut m, 2, 20);
+        m.backend.focused = Some(2);
+        m.refresh();
+        let list = m.execute(&Command::Label(None)).unwrap();
+        assert_eq!(list, "1\tmail\tcurrent\n2\t-\n3\t-\n");
+        // Switches the second display, not the main one.
+        m.execute(&Command::parse("space 3").unwrap()).unwrap();
+        assert_eq!(m.backend().displays[1].space, 22);
+        assert_eq!(m.backend().displays[0].space, 10);
+        assert!(m.execute(&Command::parse("space 4").unwrap()).is_err());
+        // And sends there too.
+        m.backend.displays[1].space = 20;
+        m.refresh();
+        m.execute(&Command::parse("send 2").unwrap()).unwrap();
+        assert_eq!(m.backend().space_of[&2], 21);
     }
 
     #[test]

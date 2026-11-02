@@ -45,9 +45,23 @@ pub trait Backend {
     fn spaces(&mut self) -> Vec<u64> {
         vec![self.active_space()]
     }
+    /// The Spaces of the display showing Space `shown`, in Mission Control
+    /// order (full-screen apps' Spaces left out).
+    fn display_spaces(&mut self, _shown: u64) -> Vec<u64> {
+        self.spaces()
+    }
     /// Switches the tiled display to Space n (numbered from 1).
     fn switch_to_space(&mut self, _n: usize) -> Result<(), String> {
         Err("switching Spaces is not supported here".into())
+    }
+    /// Shows Space `space` on its display.
+    fn show_space(&mut self, space: u64) -> Result<(), String> {
+        let n = self
+            .spaces()
+            .iter()
+            .position(|s| *s == space)
+            .ok_or("no such Space")?;
+        self.switch_to_space(n + 1)
     }
     /// Moves a window to another Space; returns whether it could. The user
     /// may be taken there along with it.

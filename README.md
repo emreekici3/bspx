@@ -118,6 +118,7 @@ If windows stop moving after an update, macOS has dropped the permission for the
 | `bspx space <space>` | Switch to a Space |
 | `bspx layout <space> bsp\|float` | Tile a Space, or leave its windows where you put them |
 | `bspx send <space>` | Move the focused window to a Space |
+| `bspx send-display <next\|prev\|n>` | Move the focused window to another display (numbered from 1, left to right) |
 | `bspx reload` | Reload the config |
 | `bspx install` | Install the login service |
 | `bspx start` / `stop` / `restart` | Control the service |
@@ -222,9 +223,9 @@ These use the macOS *Switch to Desktop N* shortcuts, so turn them on first: *Sys
 
 Each display has a layout of its own; a new window splits the window last focused on its display. Commands act on the display of the focused window.
 
-At the edge of a display, `bspx focus`, `swap` and `warp` carry on to the next display: `focus right` from a window against the right edge focuses the nearest window on the display to the right, `swap right` trades the two windows' places, and `warp right` moves the window into that display's layout (onto it alone if it has no window). Dragging a window onto another display's window swaps them, or splits it with the insert modifier held; dropping it on a part of another display with no window moves it into that display's layout.
+At the edge of a display, `bspx focus`, `swap` and `warp` carry on to the next display: `focus right` from a window against the right edge focuses the nearest window on the display to the right, `swap right` trades the two windows' places, and `warp right` moves the window into that display's layout (onto it alone if it has no window). `bspx send-display next`, `prev` or a number (from 1, left to right) moves the focused window straight to that display. Dragging a window onto another display's window splits that window, on the side nearest the pointer; dropping it on a part of another display with no window moves it into that display's layout.
 
-A display that is unplugged hands its windows to the ones left, as macOS moves them. Space names, rules and `bspx space` still go by the main display's Spaces. With *Displays have separate Spaces* off (*System Settings → Desktop & Dock*), the displays share one Space and only the main one is tiled.
+A display that is unplugged hands its windows to the ones left, as macOS moves them. Spaces are numbered from 1 on each display, as Mission Control shows them: `bspx space 2`, `send 2` and `label` act on the Spaces of the current display, and a label or `layout` setting names that number on every display. With *Displays have separate Spaces* off (*System Settings → Desktop & Dock*), the displays share one Space and only the main one is tiled.
 
 ## Configuration
 
