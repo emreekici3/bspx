@@ -4,6 +4,22 @@ A BSP tiling window manager for macOS. Every Space and display keeps its own lay
 
 ## Install
 
+```sh
+brew install emreekici3/formulae/cranberry
+
+mkdir -p ~/.config/cranberry
+cp "$(brew --prefix)/share/cranberry/cberryrc" ~/.config/cranberry/cberryrc
+
+cberry install
+cberry start
+```
+
+Then enable `cberry` under *System Settings → Privacy & Security → Accessibility*.
+
+To update, run `brew upgrade cranberry` and `cberry restart`. If windows stop moving, remove `cberry` from the Accessibility list, add it again and run `cberry restart`.
+
+### Manual install
+
 You need [Rust](https://rustup.rs).
 
 ```sh
@@ -21,17 +37,7 @@ cberry install
 cberry start
 ```
 
-Then enable `cberry` under *System Settings → Privacy & Security → Accessibility*.
-
-## Update
-
-```sh
-git pull
-cargo install --path . --root ~
-cberry restart
-```
-
-If windows stop moving, remove `cberry` from the Accessibility list, add `~/bin/cberry` again and run `cberry restart`.
+Enable `~/bin/cberry` under Accessibility as above. To update, run `git pull`, the `cargo install` line and `cberry restart`.
 
 ## Docs
 
