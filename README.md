@@ -46,7 +46,6 @@ Enable `~/bin/cberry` under Accessibility as above. To update, run `git pull`, t
 - [Mouse](docs/mouse.md)
 - [Spaces and displays](docs/spaces.md)
 - [Configuration](docs/configuration.md)
-- [Demo](docs/demo.md)
 
 ## License
 
