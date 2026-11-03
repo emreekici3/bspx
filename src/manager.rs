@@ -1772,6 +1772,71 @@ impl<B: Backend> Manager<B> {
         self.area.inset(&self.config.padding)
     }
 
+    /// The inner area of the display a window at `frame` is on, by its
+    /// centre. A floating window may be on any display, whichever is current.
+    fn inner_area_around(&self, frame: Rect) -> Rect {
+        let (x, y) = (
+            (frame.x + frame.w / 2) as f32,
+            (frame.y + frame.h / 2) as f32,
+        );
+        self.displays
+            .iter()
+            .find(|d| d.frame.contains_point(x, y))
+            .map_or(self.area, |d| d.area)
+            .inset(&self.config.padding)
+    }
+
+    /// `bspx resize` for a floating window: the rule of tiled ones, with
+    /// the display's edges for the screen's. `dir` moves its left (top)
+    /// edge, or its right (bottom) one when it is against the left (top) of
+    /// the display, by `amount` of the display.
+    fn resize_floating(&mut self, win: WinId, dir: Direction, amount: f32) -> Result<(), String> {
+        let now = self
+            .heading_of(win)
+            .ok_or("the focused window is not managed")?;
+        if !self.manageable.contains(&win) {
+            return Err("the focused window cannot be resized".into());
+        }
+        let area = self.inner_area_around(now);
+        let step = |len: i32| (len as f32 * amount).round() as i32;
+        let (mut left, mut top, mut right, mut bottom) = (now.x, now.y, now.max_x(), now.max_y());
+        match dir {
+            Direction::Left => {
+                move_edge(&mut left, &mut right, area.x, area.max_x(), -step(area.w))
+            }
+            Direction::Right => {
+                move_edge(&mut left, &mut right, area.x, area.max_x(), step(area.w))
+            }
+            Direction::Up => move_edge(&mut top, &mut bottom, area.y, area.max_y(), -step(area.h)),
+            Direction::Down => move_edge(&mut top, &mut bottom, area.y, area.max_y(), step(area.h)),
+        }
+        let frame = Rect::new(left, top, right - left, bottom - top);
+        if frame == now {
+            return Err("the border is as far as it goes".into());
+        }
+        self.glide(win, frame);
+        Ok(())
+    }
+
+    /// Where a window is, or will be once its animation ends: a key held
+    /// down moves on from there, not from a frame in flight.
+    fn heading_of(&self, win: WinId) -> Option<Rect> {
+        self.anim
+            .target(win)
+            .or_else(|| self.frames.get(&win).copied())
+    }
+
+    /// Sends a floating window to `frame`, animated as tiled windows are.
+    fn glide(&mut self, win: WinId, frame: Rect) {
+        let Some(&now) = self.frames.get(&win) else {
+            return;
+        };
+        if let Some(frame) = self.anim.animate_to(win, now, frame) {
+            self.backend.update_frame(win, frame, now);
+            self.frames.insert(win, frame);
+        }
+    }
+
     /// Where every tiled window belongs: its slot in the tree, or the zoomed
     /// window's larger area.
     fn targets(&self) -> Vec<(WinId, Rect)> {
@@ -1975,8 +2040,16 @@ impl<B: Backend> Manager<B> {
                 self.warp_to(from);
             }
             Command::Resize(dir, amount) => {
-                let win = focused()?;
                 let amount = amount.unwrap_or(self.config.resize_step);
+                let floating = self
+                    .backend
+                    .focused_window()
+                    .filter(|w| !self.is_tiled_anywhere(*w));
+                if let Some(win) = floating {
+                    self.resize_floating(win, dir, amount)?;
+                    return Ok(String::new());
+                }
+                let win = focused()?;
                 let before = self.slots();
                 let unchanged = self.tree.clone();
                 self.note_resize(&unchanged, Some((win, dir, amount)));
@@ -2055,6 +2128,30 @@ impl<B: Backend> Manager<B> {
                     self.focused = Some(win);
                     info!("window {win} tiled");
                 }
+            }
+            Command::Grid(grid) => {
+                let win = self
+                    .backend
+                    .focused_window()
+                    .or(self.focused)
+                    .ok_or("no window is focused")?;
+                let now = self
+                    .heading_of(win)
+                    .ok_or("the focused window is not managed")?;
+                let area = self.inner_area_around(now);
+                let cell = area.grid_cell(grid);
+                // One that cannot be resized keeps its size, as with a rule.
+                let frame = if self.manageable.contains(&win) {
+                    cell
+                } else {
+                    area.align_in(cell, now.w, now.h)
+                };
+                if self.tree.remove(win) {
+                    self.focused = self.tree.windows().last().copied();
+                }
+                self.floating.insert(win);
+                self.glide(win, frame);
+                info!("window {win} floats at grid {grid:?}: {frame:?}");
             }
             Command::RaiseFloating => {
                 let focused_now = self.backend.focused_window();
@@ -2266,6 +2363,17 @@ fn zoom_rect(
         Zoom::Parent => tree.parent_rect(win, area, gap)?,
     };
     Some((win, rect))
+}
+
+/// Moves the near edge of the span `start..end` by `delta`, or its far edge
+/// when it is against `lo`; within `lo..hi` and no smaller than a gesture
+/// leaves a window (a span already outside stays where it is on that side).
+fn move_edge(start: &mut i32, end: &mut i32, lo: i32, hi: i32, delta: i32) {
+    if *start <= lo {
+        *end = (*end + delta).clamp((*start + MIN_GESTURE_SIZE).min(*end), hi.max(*end));
+    } else {
+        *start = (*start + delta).clamp(lo.min(*start), (*end - MIN_GESTURE_SIZE).max(*start));
+    }
 }
 
 #[cfg(test)]
@@ -4101,6 +4209,163 @@ pub(crate) mod tests {
         m.backend.focused = Some(2);
         m.execute(&Command::ToggleFloat).unwrap();
         assert_eq!(m.tree().windows(), vec![1, 2]);
+    }
+
+    #[test]
+    fn grid_command_floats_the_focused_window_at_a_cell() {
+        let mut m = manager(0.0);
+        m.backend.open(1, "Terminal");
+        m.backend.open(2, "Notes");
+        m.refresh();
+        assert_eq!(m.tree().windows(), vec![1, 2]);
+        m.backend.focused = Some(2);
+        m.execute(&Command::Grid([2, 2, 1, 0, 1, 1])).unwrap();
+        assert_eq!(m.tree().windows(), vec![1]);
+        assert_eq!(m.backend().frame(2), Rect::new(500, 25, 500, 300));
+        // It stays floating: later polls leave it be.
+        m.refresh();
+        assert_eq!(m.tree().windows(), vec![1]);
+        assert_eq!(m.backend().frame(2), Rect::new(500, 25, 500, 300));
+        // Already floating: it just moves to another cell.
+        m.execute(&Command::Grid([2, 2, 0, 1, 1, 1])).unwrap();
+        assert_eq!(m.backend().frame(2), Rect::new(0, 325, 500, 300));
+        // And `bspx float` tiles it again.
+        m.execute(&Command::ToggleFloat).unwrap();
+        assert_eq!(m.tree().windows(), vec![1, 2]);
+    }
+
+    #[test]
+    fn grid_command_needs_a_focused_window() {
+        let mut m = manager(0.0);
+        assert!(m.execute(&Command::Grid([2, 2, 0, 0, 1, 1])).is_err());
+    }
+
+    #[test]
+    fn grid_command_stays_on_a_floating_windows_display() {
+        let mut m = two_displays();
+        open_on(&mut m, 1, 10);
+        open_on(&mut m, 2, 20);
+        m.backend.focused = Some(2);
+        m.refresh();
+        m.execute(&Command::ToggleFloat).unwrap();
+        m.backend.focused = Some(1);
+        m.refresh();
+        assert_eq!(m.active_space(), 10);
+        // Focus on a floating window does not make its display current.
+        m.backend.focused = Some(2);
+        m.refresh();
+        assert_eq!(m.active_space(), 10);
+        m.execute(&Command::Grid([2, 2, 0, 0, 1, 1])).unwrap();
+        assert_eq!(m.backend().frame(2), Rect::new(1000, 25, 400, 300));
+    }
+
+    #[test]
+    fn resize_moves_a_floating_windows_edges_as_a_tiled_ones() {
+        let mut m = manager(0.0);
+        m.backend.open(1, "Terminal");
+        m.backend.open(2, "Notes");
+        m.backend.open(3, "Mail");
+        m.refresh();
+        m.backend.focused = Some(3);
+        m.execute(&Command::Grid([4, 4, 1, 1, 2, 2])).unwrap();
+        let tiled = m.backend().frame(1);
+        let start = Rect::new(250, 175, 500, 300);
+        assert_eq!(m.backend().frame(3), start);
+        m.backend.focused = Some(3);
+        let resize = |m: &mut Manager<MockBackend>, dir| {
+            m.execute(&Command::Resize(dir, Some(0.1))).unwrap();
+        };
+        resize(&mut m, Direction::Left);
+        assert_eq!(m.backend().frame(3), Rect::new(150, 175, 600, 300));
+        resize(&mut m, Direction::Right);
+        assert_eq!(m.backend().frame(3), start);
+        resize(&mut m, Direction::Up);
+        assert_eq!(m.backend().frame(3), Rect::new(250, 115, 500, 360));
+        resize(&mut m, Direction::Down);
+        assert_eq!(m.backend().frame(3), start);
+        // The tiled windows were not the ones meant.
+        assert_eq!(m.backend().frame(1), tiled);
+    }
+
+    #[test]
+    fn resize_moves_the_far_edge_of_a_floating_window_at_the_display_edge() {
+        let mut m = manager(0.0);
+        m.backend.open(1, "Notes");
+        m.refresh();
+        m.backend.focused = Some(1);
+        m.execute(&Command::Grid([2, 2, 0, 0, 1, 1])).unwrap();
+        m.execute(&Command::Resize(Direction::Right, Some(0.1)))
+            .unwrap();
+        assert_eq!(m.backend().frame(1), Rect::new(0, 25, 600, 300));
+        m.execute(&Command::Resize(Direction::Down, Some(0.1)))
+            .unwrap();
+        assert_eq!(m.backend().frame(1), Rect::new(0, 25, 600, 360));
+    }
+
+    #[test]
+    fn resize_keeps_a_floating_window_within_its_display() {
+        let mut m = manager(0.0);
+        m.backend.open(1, "Notes");
+        m.refresh();
+        m.backend.focused = Some(1);
+        m.execute(&Command::Grid([1, 1, 0, 0, 1, 1])).unwrap();
+        // Already as wide as the display.
+        assert!(
+            m.execute(&Command::Resize(Direction::Right, Some(0.1)))
+                .is_err()
+        );
+        // Never below the smallest size a gesture leaves.
+        m.execute(&Command::Resize(Direction::Left, Some(0.99)))
+            .unwrap();
+        assert_eq!(m.backend().frame(1).w, MIN_GESTURE_SIZE);
+        assert!(
+            m.execute(&Command::Resize(Direction::Left, Some(0.1)))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn grid_and_floating_resize_animate() {
+        let mut m = manager(12.0);
+        m.backend.open(1, "Notes");
+        m.backend.open(2, "Mail");
+        m.refresh();
+        settle(&mut m);
+        m.backend.focused = Some(2);
+        let start = m.backend().frame(2);
+        let cell = Rect::new(250, 175, 500, 300);
+        m.execute(&Command::Grid([4, 4, 1, 1, 2, 2])).unwrap();
+        assert_eq!(m.backend().frame(2), start, "not there at once");
+        m.tick(1.0 / 60.0);
+        let between = m.backend().frame(2);
+        assert_ne!(between, start);
+        assert_ne!(between, cell);
+        // A key pressed twice in flight adds up from where it is heading.
+        m.execute(&Command::Resize(Direction::Left, Some(0.1)))
+            .unwrap();
+        m.execute(&Command::Resize(Direction::Left, Some(0.1)))
+            .unwrap();
+        settle(&mut m);
+        assert_eq!(m.backend().frame(2), Rect::new(50, 175, 700, 300));
+        // Polls leave it there.
+        m.refresh();
+        assert_eq!(m.backend().frame(2), Rect::new(50, 175, 700, 300));
+    }
+
+    #[test]
+    fn resize_leaves_a_fixed_size_floating_window_alone() {
+        let mut m = manager(0.0);
+        m.backend.open(1, "Terminal");
+        m.backend.open(2, "Calculator");
+        m.backend.windows.last_mut().unwrap().tileable = false;
+        m.refresh();
+        let before = m.backend().frame(2);
+        m.backend.focused = Some(2);
+        assert!(
+            m.execute(&Command::Resize(Direction::Right, Some(0.1)))
+                .is_err()
+        );
+        assert_eq!(m.backend().frame(2), before);
     }
 
     #[test]

@@ -100,7 +100,7 @@ If windows stop moving after an update, macOS has dropped the permission for the
 | `bspx focus <dir>` | Focus the neighbouring window |
 | `bspx swap <dir>` | Swap with the neighbouring window |
 | `bspx warp <dir>` | Move into the neighbouring window's place: it splits as for a new window, and the window keeps the side it came from |
-| `bspx resize <dir> [amount]` | Move a border of the window toward `<dir>`: its left (top) border, or its right (bottom) one when it is against the left (top) of the screen |
+| `bspx resize <dir> [amount]` | Move a border of the window toward `<dir>`: its left (top) border, or its right (bottom) one when it is against the left (top) of the screen. Works on tiled and floating windows |
 | `bspx rotate` | Rotate the layout 90° |
 | `bspx flip` | Swap the two halves of a split |
 | `bspx toggle-split` | Switch a split between side by side and stacked |
@@ -108,6 +108,7 @@ If windows stop moving after an update, macOS has dropped the permission for the
 | `bspx zoom [fullscreen\|parent]` | Grow the focused window over the others to the full screen (default) or its split's area; run again to put it back |
 | `bspx float` | Float or tile the focused window |
 | `bspx raise-floating` | Bring floating windows to the front |
+| `bspx grid <rows:cols:x:y:w:h>` | Float the focused window and put it at a grid cell, e.g. `6:6:1:1:4:4` centres it at two thirds of the screen |
 | `bspx query` | List windows with their app names |
 | `bspx config <key> [value]` | Show or change a setting |
 | `bspx rule float\|tile "<app>"` | Never tile an app's windows, or tile them again; `"/regex/"` matches app names by pattern |
@@ -159,6 +160,7 @@ bspx bind 'alt - m : bspx zoom'
 bspx bind 'shift + alt - m : bspx zoom parent'
 bspx bind 'alt - t : bspx float'
 bspx bind 'alt - f : bspx raise-floating'
+bspx bind 'alt - g : bspx grid 6:6:1:1:4:4'
 
 bspx bind 'alt - return : open -na Terminal'
 ```
