@@ -4,26 +4,6 @@
   An animated BSP tiling window manager for macOS, written in Rust.
 </p>
 
-## Features
-
-- BSP tiling with smooth animations
-- A separate layout for every Space
-- Every display tiled on its own, with focus, swap, warp and drags going from one to the next
-- Zoom a window to full screen or its split's area, and back
-- Keeps clear of the Dock, uses the full screen when it hides
-- Swap a window with its neighbour, or warp it into its neighbour's place
-- Pure BSP: every split follows its ratio, whatever size the windows would rather have. A window that will not shrink to its slot sticks out of it, and never takes room from the others
-- Your commands never put a window over another: a resize (keys or mouse) stops where a window was seen to go no smaller, and a swap or warp that would squeeze one refuses. Only that window's own behaviour counts, forgotten when it closes
-- Drag a window onto another to swap them, resize with the mouse
-- Hold `alt` to move or resize a window from anywhere on it
-- Hold a second key while dropping to split the window under it instead of swapping
-- Optional focus follows mouse and mouse follows focus
-- Built-in keyboard shortcuts
-- Named Spaces, switching Spaces, rules that send apps to them, and floating Spaces
-- Rules that open an app's windows floating at a place and size of your choosing, on a grid
-- Shell-script config
-- No need to disable SIP
-
 <details>
 <summary><b>Demo</b></summary>
 <br>
@@ -49,7 +29,6 @@
 
 ## Requirements
 
-- macOS
 - [Rust](https://rustup.rs)
 
 ## Installation
