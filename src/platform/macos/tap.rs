@@ -62,7 +62,7 @@ const RIGHT_MOUSE_DRAGGED: u32 = 7;
 const TAP_DISABLED_BY_TIMEOUT: u32 = 0xFFFF_FFFE;
 const TAP_DISABLED_BY_USER_INPUT: u32 = 0xFFFF_FFFF;
 
-/// How often the tap thread checks that bspx may still use Accessibility,
+/// How often the tap thread checks that cberry may still use Accessibility,
 /// in seconds.
 const TRUST_CHECK_SECS: f64 = 0.25;
 
@@ -141,7 +141,7 @@ fn store_location(event: CFTypeRef) {
 
 fn start() {
     let spawned = std::thread::Builder::new()
-        .name("bspx-mouse".into())
+        .name("cberry-mouse".into())
         .spawn(|| unsafe {
             let events = [
                 LEFT_MOUSE_DOWN,
@@ -184,7 +184,7 @@ fn start() {
             TAP.store(ptr::null_mut(), Relaxed);
             CFMachPortInvalidate(tap);
             warn!("accessibility permission was removed; restarting");
-            // launchd starts bspx again, which then waits for the permission.
+            // launchd starts cberry again, which then waits for the permission.
             std::process::exit(1);
         });
     if let Err(e) = spawned {

@@ -1,4 +1,4 @@
-//! Unix socket between `bspx <command>` and the running daemon.
+//! Unix socket between `cberry <command>` and the running daemon.
 //! One request per connection: a single line in, the reply out.
 //! Replies start with `ok` or `err`, followed by the message.
 
@@ -8,11 +8,11 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub fn socket_path() -> PathBuf {
-    if let Some(p) = std::env::var_os("BSPX_SOCKET") {
+    if let Some(p) = std::env::var_os("CBERRY_SOCKET") {
         return PathBuf::from(p);
     }
     let user = std::env::var("USER").unwrap_or_else(|_| "user".into());
-    std::env::temp_dir().join(format!("bspx_{user}.sock"))
+    std::env::temp_dir().join(format!("cberry_{user}.sock"))
 }
 
 pub struct Server {
@@ -28,7 +28,7 @@ impl Server {
             if UnixStream::connect(path).is_ok() {
                 return Err(io::Error::new(
                     io::ErrorKind::AddrInUse,
-                    "bspx is already running",
+                    "cberry is already running",
                 ));
             }
             std::fs::remove_file(path)?;
@@ -107,7 +107,7 @@ mod tests {
 
     #[test]
     fn round_trip() {
-        let dir = std::env::temp_dir().join(format!("bspx-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("cberry-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("s.sock");
         let server = Server::bind(&path).unwrap();

@@ -1,4 +1,4 @@
-//! What tells bspx that something changed, now that it no longer polls.
+//! What tells cberry that something changed, now that it no longer polls.
 //!
 //! Window-level changes (a window opened, moved, resized, focused, closed,
 //! minimised) come through each app's Accessibility observer, set up in
@@ -89,7 +89,7 @@ unsafe fn listen() -> Result<(), &'static str> {
 
         // A tiny Objective-C class whose methods only raise the flags above.
         let superclass = objc_getClass(c"NSObject".as_ptr());
-        let class = objc_allocateClassPair(superclass, c"BspxWorkspaceObserver".as_ptr(), 0);
+        let class = objc_allocateClassPair(superclass, c"CberryWorkspaceObserver".as_ptr(), 0);
         if class.is_null() {
             return Err("cannot create the observer class");
         }

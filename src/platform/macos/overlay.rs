@@ -52,7 +52,7 @@ impl OverlayWindow {
             if app.is_null() {
                 return None;
             }
-            // No Dock icon, no menu bar: bspx stays a background tool.
+            // No Dock icon, no menu bar: cberry stays a background tool.
             let _: i8 = msg!(app, "setActivationPolicy:", NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY => isize; -> i8);
             msg!(app, "finishLaunching");
 
@@ -139,7 +139,7 @@ impl OverlayWindow {
     }
 
     /// Hands pending AppKit events to the app so the window draws and
-    /// stays responsive. bspx has no run loop of its own to do this.
+    /// stays responsive. cberry has no run loop of its own to do this.
     pub fn pump(&mut self) {
         unsafe {
             let pool = objc_autoreleasePoolPush();

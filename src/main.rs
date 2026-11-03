@@ -1,17 +1,17 @@
 use std::process::ExitCode;
 
-use bspx::command::{Command, USAGE};
-use bspx::ipc;
+use cranberry::command::{Command, USAGE};
+use cranberry::ipc;
 
 fn print_help() {
-    println!("bspx - animated BSP tiling window manager for macOS\n");
+    println!("cberry - animated BSP tiling window manager for macOS\n");
     println!("service:");
-    println!("  bspx install            install bspx as a login service");
-    println!("  bspx start              start the service");
-    println!("  bspx stop               stop the service");
-    println!("  bspx restart            restart the service");
-    println!("  bspx uninstall          remove the service");
-    println!("  bspx run                run in this terminal instead (for debugging)\n");
+    println!("  cberry install            install cberry as a login service");
+    println!("  cberry start              start the service");
+    println!("  cberry stop               stop the service");
+    println!("  cberry restart            restart the service");
+    println!("  cberry uninstall          remove the service");
+    println!("  cberry run                run in this terminal instead (for debugging)\n");
     println!("{USAGE}");
 }
 
@@ -22,7 +22,7 @@ fn report(result: Result<String, String>) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(msg) => {
-            eprintln!("bspx: {msg}");
+            eprintln!("cberry: {msg}");
             ExitCode::FAILURE
         }
     }
@@ -42,7 +42,7 @@ fn main() -> ExitCode {
         Some(_) => {
             let line = args.join(" ");
             if let Err(e) = Command::parse(&line) {
-                eprintln!("bspx: {e}\n\n{USAGE}");
+                eprintln!("cberry: {e}\n\n{USAGE}");
                 return ExitCode::from(2);
             }
             match ipc::send(&ipc::socket_path(), &line) {
@@ -51,12 +51,12 @@ fn main() -> ExitCode {
                     ExitCode::SUCCESS
                 }
                 Ok(Err(msg)) => {
-                    eprintln!("bspx: {msg}");
+                    eprintln!("cberry: {msg}");
                     ExitCode::FAILURE
                 }
                 Err(e) => {
                     eprintln!(
-                        "bspx: cannot reach the window manager ({e}). Is it running? Try `bspx start`."
+                        "cberry: cannot reach the window manager ({e}). Is it running? Try `cberry start`."
                     );
                     ExitCode::FAILURE
                 }
@@ -65,9 +65,9 @@ fn main() -> ExitCode {
     }
 }
 
-#[cfg(any(target_os = "macos", bspx_check_macos))]
+#[cfg(any(target_os = "macos", cberry_check_macos))]
 fn service(cmd: &str) -> ExitCode {
-    use bspx::service;
+    use cranberry::service;
     report(match cmd {
         "install" => service::install(),
         "uninstall" => service::uninstall(),
@@ -77,22 +77,22 @@ fn service(cmd: &str) -> ExitCode {
     })
 }
 
-#[cfg(not(any(target_os = "macos", bspx_check_macos)))]
+#[cfg(not(any(target_os = "macos", cberry_check_macos)))]
 fn service(_cmd: &str) -> ExitCode {
     report(Err("the service only runs on macOS".into()))
 }
 
-#[cfg(any(target_os = "macos", bspx_check_macos))]
+#[cfg(any(target_os = "macos", cberry_check_macos))]
 fn run() -> ExitCode {
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
 
-    use bspx::config::Config;
-    use bspx::daemon;
-    use bspx::platform::macos::{MacBackend, ensure_accessibility};
+    use cranberry::config::Config;
+    use cranberry::daemon;
+    use cranberry::platform::macos::{MacBackend, ensure_accessibility};
 
     // Let everything up to debug through, but show only info unless asked:
-    // `bspx config log_level debug` turns the rest on without a restart.
+    // `cberry config log_level debug` turns the rest on without a restart.
     let env = env_logger::Env::default();
     let chosen = std::env::var_os(env_logger::DEFAULT_FILTER_ENV).is_some();
     env_logger::Builder::from_env(env.default_filter_or("debug"))
@@ -102,7 +102,7 @@ fn run() -> ExitCode {
         log::set_max_level(log::LevelFilter::Info);
     }
 
-    // Ask once, then wait: exiting would make launchd start bspx again
+    // Ask once, then wait: exiting would make launchd start cberry again
     // and again, asking each time.
     if !ensure_accessibility(true) {
         wait_for_accessibility();
@@ -121,22 +121,22 @@ fn run() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Blocks until bspx may use the Accessibility API, then starts over.
+/// Blocks until cberry may use the Accessibility API, then starts over.
 ///
 /// macOS does not tell a running process that it was granted access: asking
 /// again from this process keeps saying no until it restarts. So a fresh
-/// copy of bspx is asked every couple of seconds, and once it says yes this
-/// process replaces itself with a new `bspx run`.
-#[cfg(any(target_os = "macos", bspx_check_macos))]
+/// copy of cberry is asked every couple of seconds, and once it says yes this
+/// process replaces itself with a new `cberry run`.
+#[cfg(any(target_os = "macos", cberry_check_macos))]
 fn wait_for_accessibility() {
     use std::os::unix::process::CommandExt;
     use std::time::Duration;
 
     log::warn!(
-        "waiting for accessibility permission: allow bspx in System Settings > \
+        "waiting for accessibility permission: allow cberry in System Settings > \
          Privacy & Security > Accessibility"
     );
-    let exe = std::env::current_exe().unwrap_or_else(|e| bspx::daemon::fail(e));
+    let exe = std::env::current_exe().unwrap_or_else(|e| cranberry::daemon::fail(e));
     loop {
         std::thread::sleep(Duration::from_secs(2));
         let granted = std::process::Command::new(&exe)
@@ -146,26 +146,26 @@ fn wait_for_accessibility() {
         if granted {
             log::info!("accessibility permission granted, starting");
             let err = std::process::Command::new(&exe).arg("run").exec();
-            bspx::daemon::fail(format!("cannot restart bspx: {err}"));
+            cranberry::daemon::fail(format!("cannot restart cberry: {err}"));
         }
     }
 }
 
-#[cfg(any(target_os = "macos", bspx_check_macos))]
+#[cfg(any(target_os = "macos", cberry_check_macos))]
 fn check_accessibility() -> ExitCode {
-    if bspx::platform::macos::ensure_accessibility(false) {
+    if cranberry::platform::macos::ensure_accessibility(false) {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
     }
 }
 
-#[cfg(not(any(target_os = "macos", bspx_check_macos)))]
+#[cfg(not(any(target_os = "macos", cberry_check_macos)))]
 fn check_accessibility() -> ExitCode {
     ExitCode::FAILURE
 }
 
-#[cfg(not(any(target_os = "macos", bspx_check_macos)))]
+#[cfg(not(any(target_os = "macos", cberry_check_macos)))]
 fn run() -> ExitCode {
     report(Err("the window manager only runs on macOS".into()))
 }

@@ -12,6 +12,7 @@ use crate::command::Command;
 use crate::config::Config;
 use crate::ipc::Server;
 use crate::manager::Manager;
+use crate::motion::paced;
 use crate::platform::Backend;
 
 /// Loop interval when nothing is moving. While something is, the loop
@@ -35,7 +36,7 @@ const SETTLE: Duration = Duration::from_secs(1);
 /// from the defaults.
 const RC_GRACE: Duration = Duration::from_secs(3);
 
-/// A running `bspxrc`.
+/// A running `cberryrc`.
 struct RcScript {
     child: Child,
     started: Instant,
@@ -43,7 +44,7 @@ struct RcScript {
 
 impl RcScript {
     /// Starts `sh <path>` in the background. The script talks back to the
-    /// daemon through `bspx config ...`, so `bspx` must be on its `PATH`.
+    /// daemon through `cberry config ...`, so `cberry` must be on its `PATH`.
     fn spawn(path: &Path) -> Option<Self> {
         let mut cmd = Process::new("/bin/sh");
         cmd.arg(path);
@@ -103,7 +104,7 @@ impl Drop for RcScript {
 /// says it changed (a window or app event, a command), every tenth of a
 /// second for a second after the last event, when an animation ends (to see
 /// where the windows really went), and, briefly, while the backend waits
-/// for a new window or app to settle. Left alone, bspx does not look at all.
+/// for a new window or app to settle. Left alone, cberry does not look at all.
 pub fn run<B: Backend>(
     backend: B,
     rc_path: Option<PathBuf>,
@@ -143,10 +144,10 @@ pub fn run<B: Backend>(
             }
         };
         server.poll(|line| handle(&mut manager, line));
-        // Keyboard shortcuts whose command is `bspx ...` run here, at once.
+        // Keyboard shortcuts whose command is `cberry ...` run here, at once.
         for line in manager.hotkey_commands() {
             if let Err(e) = handle(&mut manager, &line) {
-                warn!("hotkey 'bspx {line}': {e}");
+                warn!("hotkey 'cberry {line}': {e}");
             }
         }
         if reload {
@@ -172,6 +173,8 @@ pub fn run<B: Backend>(
 
         let now = Instant::now();
         let dt = now.duration_since(last_frame).as_secs_f64();
+        let refresh = manager.frame_interval().as_secs_f64();
+        let dt = paced(dt, refresh);
         last_frame = now;
         manager.tick(dt);
         let took = now.elapsed();
@@ -211,12 +214,15 @@ pub fn run<B: Backend>(
         // Sleep only what is left of the frame, so frames stay evenly spaced
         // however long this one's work took. The windows are written by
         // their apps' own threads, so a slow app does not make it late.
-        let interval = if manager.is_animating() {
-            manager.frame_interval()
+        if manager.is_animating() {
+            let remaining = manager
+                .frame_interval()
+                .saturating_sub(frame_start.elapsed());
+            manager.wait_frame(remaining);
         } else {
-            IDLE_FRAME
-        };
-        std::thread::sleep(interval.saturating_sub(frame_start.elapsed()));
+            manager.stop_frames();
+            std::thread::sleep(IDLE_FRAME.saturating_sub(frame_start.elapsed()));
+        }
     }
     info!("stopping");
 }
@@ -224,6 +230,6 @@ pub fn run<B: Backend>(
 /// Logs a fatal startup error and exits.
 pub fn fail(msg: impl std::fmt::Display) -> ! {
     error!("{msg}");
-    eprintln!("bspx: {msg}");
+    eprintln!("cberry: {msg}");
     std::process::exit(1);
 }

@@ -1,6 +1,6 @@
 //! Settings. There is no config file format: the config is a
-//! shell script (`bspxrc`) that bspx runs at startup, made of `bspx config`
-//! and `bspx rule` commands. The same commands change settings at runtime.
+//! shell script (`cberryrc`) that cberry runs at startup, made of `cberry config`
+//! and `cberry rule` commands. The same commands change settings at runtime.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -8,7 +8,9 @@ use std::path::PathBuf;
 use crate::geometry::Padding;
 use crate::platform::{Modifier, MouseButton};
 
-use crate::anim::{DURATION_K, Easing};
+/// `animation_speed` is an older way to say how long a window takes:
+/// this many over the duration.
+const SPEED_PER_DURATION: f64 = 5.0;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
@@ -16,16 +18,14 @@ pub struct Config {
     pub gap: i32,
     /// Space between the tiled area and the screen edges.
     pub padding: Padding,
-    /// Animation decay rate per second .
-    /// Higher is snappier; `0` disables animations.
-    pub animation_speed: f64,
-    /// Animation curve: exponential ease-out, or cubic ease-in-out.
-    pub animation_easing: Easing,
+    /// How long a window takes to reach its place, in seconds; `0` disables
+    /// animations.
+    pub animation_duration: f64,
     /// Share of the area the existing window keeps when a new one splits it.
     pub split_ratio: f32,
     /// Default amount for `resize` commands, as a fraction of the split.
     pub resize_step: f32,
-    /// Kept so older configs still load: bspx no longer polls, it waits
+    /// Kept so older configs still load: cberry no longer polls, it waits
     /// for window, app, Space and display events instead.
     pub poll_interval_ms: u64,
     /// Apps (by name, e.g. "System Settings") whose windows are never tiled.
@@ -48,7 +48,7 @@ pub struct Config {
     /// The window under the pointer gets focus (and is raised: macOS has no
     /// focus without raising, short of disabling SIP).
     pub focus_follows_mouse: bool,
-    /// How much to log; `None` leaves it as bspx was started with.
+    /// How much to log; `None` leaves it as cberry was started with.
     pub log_level: Option<log::LevelFilter>,
     /// Space names, by Space number (from 1, as in Mission Control).
     pub labels: BTreeMap<usize, String>,
@@ -59,7 +59,7 @@ pub struct Config {
     pub grid_rules: Vec<(String, [u32; 6])>,
     /// Spaces (numbers or labels) whose windows are not tiled.
     pub float_spaces: Vec<String>,
-    /// Keyboard shortcut lines (`bspx bind`).
+    /// Keyboard shortcut lines (`cberry bind`).
     pub hotkeys: Vec<String>,
 }
 
@@ -92,8 +92,7 @@ impl Default for Config {
         Self {
             gap: 8,
             padding: Padding::uniform(8),
-            animation_speed: 12.0,
-            animation_easing: Easing::Spring,
+            animation_duration: 0.42,
             split_ratio: 0.5,
             resize_step: 0.05,
             poll_interval_ms: 150,
@@ -131,13 +130,11 @@ impl Config {
     }
 }
 
-/// Names accepted by `bspx config`, for help and error messages.
+/// Names accepted by `cberry config`, for help and error messages.
 pub const KEYS: &[&str] = &[
     "gap",
     "padding",
     "animation_duration",
-    "animation_speed",
-    "animation_easing",
     "split_ratio",
     "resize_step",
     "poll_interval",
@@ -159,7 +156,7 @@ pub const KEYS: &[&str] = &[
 /// with `(?i)`). Any other pattern must equal the name. Names are compared
 /// without invisible formatting characters and surrounding whitespace: some
 /// apps put such characters in their names (WhatsApp reports itself as
-/// "\u{200e}WhatsApp"), and the name typed in `bspxrc` cannot contain them.
+/// "\u{200e}WhatsApp"), and the name typed in `cberryrc` cannot contain them.
 pub fn app_matches(rule: &str, app: &str) -> bool {
     let app = clean_app_name(app);
     match app_regex(rule) {
@@ -286,7 +283,7 @@ fn one<'a>(key: &str, args: &[&'a str]) -> Result<&'a str, String> {
 }
 
 impl Config {
-    /// Applies `bspx config <key> <args...>`.
+    /// Applies `cberry config <key> <args...>`.
     pub fn set(&mut self, key: &str, args: &[&str]) -> Result<(), String> {
         match key {
             "gap" => {
@@ -326,20 +323,23 @@ impl Config {
                 if !(0.0..=5.0).contains(&secs) {
                     return Err(format!("{key}: must be between 0 and 5 seconds"));
                 }
-                self.animation_speed = if secs == 0.0 { 0.0 } else { DURATION_K / secs };
+                self.animation_duration = secs;
             }
+            // Kept so older configs still load.
             "animation_speed" => {
                 let v: f64 = number(key, one(key, args)?)?;
                 if v < 0.0 {
                     return Err("animation_speed: must not be negative".into());
                 }
-                self.animation_speed = v;
+                self.animation_duration = if v == 0.0 {
+                    0.0
+                } else {
+                    SPEED_PER_DURATION / v
+                };
             }
+            // Kept so older configs still load: there is one curve now.
             "animation_easing" | "easing" => {
-                let v = one(key, args)?;
-                self.animation_easing = Easing::parse(v).ok_or_else(|| {
-                    format!("{key}: expected spring, ease_in_out or ease_out, got '{v}'")
-                })?;
+                one(key, args)?;
             }
             "split_ratio" => {
                 let v: f32 = number(key, one(key, args)?)?;
@@ -420,7 +420,7 @@ impl Config {
         Ok(())
     }
 
-    /// Answers `bspx config <key>`.
+    /// Answers `cberry config <key>`.
     pub fn get(&self, key: &str) -> Result<String, String> {
         Ok(match key {
             "gap" => self.gap.to_string(),
@@ -428,15 +428,7 @@ impl Config {
                 let p = self.padding;
                 format!("{} {} {} {}", p.top, p.right, p.bottom, p.left)
             }
-            "animation_duration" | "animation" => {
-                if self.animation_speed <= 0.0 {
-                    "0".into()
-                } else {
-                    format!("{:.2}", DURATION_K / self.animation_speed)
-                }
-            }
-            "animation_speed" => self.animation_speed.to_string(),
-            "animation_easing" | "easing" => self.animation_easing.name().to_string(),
+            "animation_duration" | "animation" => self.animation_duration.to_string(),
             "split_ratio" => self.split_ratio.to_string(),
             "resize_step" => self.resize_step.to_string(),
             "poll_interval" | "poll_interval_ms" => self.poll_interval_ms.to_string(),
@@ -466,25 +458,25 @@ impl Config {
         })
     }
 
-    /// `bspx label <n> <name>`. A name belongs to one Space only.
+    /// `cberry label <n> <name>`. A name belongs to one Space only.
     pub fn set_label(&mut self, n: usize, name: &str) {
         self.labels.retain(|_, l| l != name);
         self.labels.insert(n, name.to_string());
     }
 
-    /// `bspx rule space <space> <app>`.
+    /// `cberry rule space <space> <app>`.
     pub fn set_space_rule(&mut self, app: &str, space: &str) {
         self.space_rules.retain(|(a, _)| !same_rule(a, app));
         self.space_rules.push((app.to_string(), space.to_string()));
     }
 
-    /// `bspx rule grid <rows:cols:x:y:w:h> <app>`.
+    /// `cberry rule grid <rows:cols:x:y:w:h> <app>`.
     pub fn set_grid_rule(&mut self, app: &str, grid: [u32; 6]) {
         self.grid_rules.retain(|(a, _)| !same_rule(a, app));
         self.grid_rules.push((app.to_string(), grid));
     }
 
-    /// `bspx layout <space> float|bsp`.
+    /// `cberry layout <space> float|bsp`.
     pub fn set_float_space(&mut self, space: &str, float: bool) {
         let n = self.space_number(space);
         let kept: Vec<String> = self
@@ -509,7 +501,7 @@ impl Config {
         })
     }
 
-    /// `bspx rule float <app>` / `bspx rule tile <app>`.
+    /// `cberry rule float <app>` / `cberry rule tile <app>`.
     pub fn set_float_app(&mut self, app: &str, float: bool) {
         self.float_apps.retain(|a| !same_rule(a, app));
         if float {
@@ -520,16 +512,16 @@ impl Config {
     /// Where to look for the config script, in priority order.
     pub fn rc_paths() -> Vec<PathBuf> {
         let mut paths = Vec::new();
-        if let Some(p) = std::env::var_os("BSPX_CONFIG") {
+        if let Some(p) = std::env::var_os("CBERRY_CONFIG") {
             paths.push(PathBuf::from(p));
         }
         if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
-            paths.push(PathBuf::from(xdg).join("bspx/bspxrc"));
+            paths.push(PathBuf::from(xdg).join("cranberry/cberryrc"));
         }
         if let Some(home) = std::env::var_os("HOME") {
             let home = PathBuf::from(home);
-            paths.push(home.join(".config/bspx/bspxrc"));
-            paths.push(home.join(".bspxrc"));
+            paths.push(home.join(".config/cranberry/cberryrc"));
+            paths.push(home.join(".cberryrc"));
         }
         paths
     }
@@ -551,10 +543,10 @@ mod tests {
         assert_eq!(c.get("gap").unwrap(), "12");
 
         c.set("animation", &["0.25"]).unwrap();
-        assert_eq!(c.animation_speed, 20.0);
+        assert_eq!(c.animation_duration, 0.25);
         assert_eq!(c.get("animation_duration").unwrap(), "0.25");
         c.set("animation_duration", &["0"]).unwrap();
-        assert_eq!(c.animation_speed, 0.0);
+        assert_eq!(c.animation_duration, 0.0);
 
         c.set("padding", &["40", "8", "8", "8"]).unwrap();
         assert_eq!(c.get("padding").unwrap(), "40 8 8 8");
@@ -582,11 +574,13 @@ mod tests {
     #[test]
     fn easing_setting() {
         let mut c = Config::default();
-        assert_eq!(c.get("animation_easing").unwrap(), "spring");
+        // Older configs still load; the curve is not theirs to choose now.
+        let before = c.clone();
         c.set("animation_easing", &["ease_in_out"]).unwrap();
-        assert_eq!(c.animation_easing, Easing::EaseInOut);
+        assert_eq!(c, before);
+        c.set("animation_speed", &["20"]).unwrap();
+        assert_eq!(c.animation_duration, 0.25);
         c.set("easing", &["ease_out"]).unwrap();
-        assert!(c.set("animation_easing", &["bounce"]).is_err());
     }
 
     #[test]

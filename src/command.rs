@@ -1,9 +1,9 @@
-//! Commands accepted over the socket (`bspx <command>`).
+//! Commands accepted over the socket (`cberry <command>`).
 
 use crate::config::check_app_pattern;
 use crate::geometry::Direction;
 
-/// How far `bspx zoom` grows a window.
+/// How far `cberry zoom` grows a window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Zoom {
     /// The whole tiling area.
@@ -12,7 +12,7 @@ pub enum Zoom {
     Parent,
 }
 
-/// Which display `bspx send-display` means. Displays are numbered from 1,
+/// Which display `cberry send-display` means. Displays are numbered from 1,
 /// left to right.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DisplayTarget {
@@ -106,17 +106,17 @@ commands:
   send-display <next|prev|n>               move the focused window to another display
   retile | reload | query | quit
 
-settings (put these in ~/.config/bspx/bspxrc):
+settings (put these in ~/.config/cranberry/cberryrc):
   config <key> [value]       e.g. config animation 0.25, config gap 10
                              keys: gap, padding, animation_duration (alias animation),
-                             animation_speed, split_ratio, resize_step, poll_interval
+                             split_ratio, resize_step, poll_interval
   rule <float|tile> <app>    e.g. rule float System Settings
   rule space <space> <app>   e.g. rule space web Safari
   rule grid <r:c:x:y:w:h> <app>
                              open an app's windows floating at a grid cell,
                              e.g. rule grid 4:4:3:0:1:1 Calculator (top right)
   label [<n> <name>]         name Space n, e.g. label 2 web; alone, list Spaces
-  bind ['<hotkey>']          a keyboard shortcut, e.g. bind 'alt - h : bspx focus left';
+  bind ['<hotkey>']          a keyboard shortcut, e.g. bind 'alt - h : cberry focus left';
                              alone, list them
   <space> is a Space number (from 1) or a label";
 

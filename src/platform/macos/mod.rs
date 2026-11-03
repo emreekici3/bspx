@@ -7,6 +7,7 @@ mod ffi;
 mod hotkeys;
 mod overlay;
 mod tap;
+mod vsync;
 mod writer;
 
 use std::collections::{HashMap, HashSet};
@@ -208,7 +209,7 @@ fn window_id(element: AXUIElementRef) -> Option<WinId> {
     (err == kAXErrorSuccess && id != 0).then_some(id)
 }
 
-/// Returns whether bspx may use the Accessibility API, asking the user for
+/// Returns whether cberry may use the Accessibility API, asking the user for
 /// permission (system dialog) when `prompt` is set.
 pub fn ensure_accessibility(prompt: bool) -> bool {
     unsafe {
@@ -244,7 +245,7 @@ struct CgWindow {
 /// background (a terminal's) does not change this.
 const VISIBLE_ALPHA: f64 = 0.5;
 
-/// Normal application windows, other than bspx's own. `on_screen_only`
+/// Normal application windows, other than cberry's own. `on_screen_only`
 /// limits them to the active Space; otherwise windows on every Space,
 /// minimised and hidden ones included, are listed.
 fn cg_windows(on_screen_only: bool) -> Vec<CgWindow> {
@@ -975,6 +976,7 @@ pub struct MacBackend {
     /// Created the first time a drop target is highlighted.
     overlay: Option<OverlayWindow>,
     /// Write the frames, a thread per app.
+    vsync: vsync::Vsync,
     writers: writer::Writers,
     /// The main display's highest refresh rate, frames per second.
     frame_rate: Option<f64>,
@@ -1009,6 +1011,7 @@ impl MacBackend {
             alive: HashSet::new(),
             connection: unsafe { CGSMainConnectionID() },
             overlay: None,
+            vsync: vsync::Vsync::default(),
             writers: writer::Writers::default(),
             frame_rate: None,
             dock: DockApi::new(),
@@ -1182,10 +1185,10 @@ impl MacBackend {
             return;
         };
         let pid = win.pid;
-        // `bspx config log_level debug` traces every write: where the window
+        // `cberry config log_level debug` traces every write: where the window
         // was asked to go, and where the app put it after the first call and
         // at the end.
-        let trace = log::log_enabled!(target: "bspx::frames", log::Level::Debug);
+        let trace = log::log_enabled!(target: "cranberry::frames", log::Level::Debug);
         self.writers.send(
             pid,
             writer::Job {
@@ -1404,7 +1407,7 @@ impl Backend for MacBackend {
     }
 
     fn active_space(&mut self) -> u64 {
-        // The Space on the main display, the one bspx tiles. The system-wide
+        // The Space on the main display, the one cberry tiles. The system-wide
         // "active" Space follows focus to other displays instead.
         unsafe {
             let space = main_display_uuid().map_or(0, |n| {
@@ -1587,6 +1590,17 @@ impl Backend for MacBackend {
         if let Some(w) = &mut self.overlay {
             w.pump();
         }
+    }
+
+    fn wait_frame(&mut self, remaining: std::time::Duration, refresh: std::time::Duration) {
+        // A late refresh still beats a wrong guess, within reason.
+        if self.vsync.wait(refresh + refresh / 2).is_err() {
+            std::thread::sleep(remaining);
+        }
+    }
+
+    fn stop_frames(&mut self) {
+        self.vsync.stop();
     }
 
     fn frame_rate(&mut self) -> Option<f64> {

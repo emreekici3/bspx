@@ -1,16 +1,16 @@
 //! Keyboard shortcuts.
 //!
-//! Every `bspx bind '<line>'` in bspxrc adds one shortcut:
+//! Every `cberry bind '<line>'` in cberryrc adds one shortcut:
 //!
 //! ```text
-//! shift + alt - left : bspx swap left
+//! shift + alt - left : cberry swap left
 //! ^ modifiers   ^ key  ^ command
 //! ```
 //!
 //! Modifiers are joined with `+` and end with `-`; a shortcut can have none.
 //! The key is a character, a named key (`return`, `left`, `f5`, ...) or a
 //! key code (`0x32`). `->` before the `:` lets the key press through to the
-//! app as well. A command that is just `bspx ...` runs inside bspx; anything
+//! app as well. A command that is just `cberry ...` runs inside cberry; anything
 //! else runs in the shell.
 //!
 //! This module only parses and matches; reading the keyboard is the
@@ -255,13 +255,13 @@ pub fn check(text: &str) -> Result<usize, String> {
 /// What to do with a key press.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Action {
-    /// A bspx command line, run by the daemon.
-    Bspx(String),
+    /// A cberry command line, run by the daemon.
+    Cberry(String),
     /// A command for the shell.
     Shell(String),
 }
 
-/// A command that only runs bspx with plain words runs in the daemon; one
+/// A command that only runs cberry with plain words runs in the daemon; one
 /// that needs the shell (quotes, pipes, variables, several commands) gets
 /// the shell.
 pub fn action(command: &str) -> Action {
@@ -270,9 +270,9 @@ pub fn action(command: &str) -> Action {
         '~', '#', '=', '!', '\n',
     ];
     let mut words = command.split_whitespace();
-    let is_bspx = words
+    let is_cberry = words
         .next()
-        .is_some_and(|w| w == "bspx" || w.ends_with("/bspx"));
+        .is_some_and(|w| w == "cberry" || w.ends_with("/cberry"));
     let rest: Vec<&str> = words.collect();
     let plain = !command.contains(SHELL_CHARS);
     let first = rest.first().copied().unwrap_or("");
@@ -281,8 +281,8 @@ pub fn action(command: &str) -> Action {
         first,
         "run" | "install" | "uninstall" | "start" | "stop" | "restart" | "help" | "-h" | "--help"
     );
-    if is_bspx && plain && !rest.is_empty() && !service {
-        Action::Bspx(rest.join(" "))
+    if is_cberry && plain && !rest.is_empty() && !service {
+        Action::Cberry(rest.join(" "))
     } else {
         Action::Shell(command.to_string())
     }
@@ -382,11 +382,11 @@ mod tests {
 
     #[test]
     fn parses_lines() {
-        let b = Binding::parse("shift + alt - left : bspx swap left").unwrap();
+        let b = Binding::parse("shift + alt - left : cberry swap left").unwrap();
         assert_eq!(b.mods.shift, Side::Any);
         assert_eq!(b.mods.alt, Side::Any);
         assert_eq!(b.key, Key::Code(0x7B));
-        assert_eq!(b.command, "bspx swap left");
+        assert_eq!(b.command, "cberry swap left");
         assert!(!b.passthrough);
 
         let b = Binding::parse("hyper - 1 : echo one").unwrap();
@@ -435,8 +435,8 @@ mod tests {
     #[test]
     fn matches_presses() {
         let (hk, problems) = Hotkeys::build(
-            "alt - h : bspx focus left\n\
-             ralt - l : bspx focus right\n\
+            "alt - h : cberry focus left\n\
+             ralt - l : cberry focus right\n\
              alt - left -> : echo through\n\
              alt - ş : echo turkish\n",
             &layout(),
@@ -447,7 +447,7 @@ mod tests {
         // Either alt key takes a plain `alt`.
         assert_eq!(
             hk.press(0x04, &held_alt_left()),
-            Some((Action::Bspx("focus left".into()), true))
+            Some((Action::Cberry("focus left".into()), true))
         );
         let right = Held {
             alt: (false, true),
@@ -491,20 +491,26 @@ mod tests {
     }
 
     #[test]
-    fn bspx_commands_run_inside() {
-        assert_eq!(action("bspx focus left"), Action::Bspx("focus left".into()));
+    fn cberry_commands_run_inside() {
         assert_eq!(
-            action("~/bin/bspx swap up"),
-            Action::Shell("~/bin/bspx swap up".into())
+            action("cberry focus left"),
+            Action::Cberry("focus left".into())
         );
         assert_eq!(
-            action("/Users/me/bin/bspx  space 2"),
-            Action::Bspx("space 2".into())
+            action("~/bin/cberry swap up"),
+            Action::Shell("~/bin/cberry swap up".into())
         );
-        assert_eq!(action("bspx restart"), Action::Shell("bspx restart".into()));
         assert_eq!(
-            action("bspx focus left && echo hi"),
-            Action::Shell("bspx focus left && echo hi".into())
+            action("/Users/me/bin/cberry  space 2"),
+            Action::Cberry("space 2".into())
+        );
+        assert_eq!(
+            action("cberry restart"),
+            Action::Shell("cberry restart".into())
+        );
+        assert_eq!(
+            action("cberry focus left && echo hi"),
+            Action::Shell("cberry focus left && echo hi".into())
         );
         assert_eq!(
             action("open -a Safari"),

@@ -1,5 +1,5 @@
 //! Raw bindings to the parts of CoreFoundation, CoreGraphics, the
-//! Accessibility API (HIServices) and the Objective-C runtime that bspx uses.
+//! Accessibility API (HIServices) and the Objective-C runtime that cberry uses.
 //! Declared by hand to keep the dependency list short.
 
 #![allow(non_upper_case_globals, non_snake_case, dead_code)]

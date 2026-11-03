@@ -1,11 +1,12 @@
 //! The window system interface the manager drives.
 
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use crate::bsp::WinId;
 use crate::geometry::Rect;
 
-#[cfg(any(target_os = "macos", bspx_check_macos))]
+#[cfg(any(target_os = "macos", cberry_check_macos))]
 pub mod macos;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -17,12 +18,12 @@ pub struct WindowInfo {
     /// A normal, resizable document window (not a dialog, sheet, panel,
     /// minimized or fullscreen window).
     pub tileable: bool,
-    /// A normal window bspx can move, though perhaps not resize (a
+    /// A normal window cberry can move, though perhaps not resize (a
     /// fixed-size one such as Calculator). Every tileable window is movable.
     pub movable: bool,
 }
 
-/// A display bspx tiles, as of the last look.
+/// A display cberry tiles, as of the last look.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Display {
     /// The whole display.
@@ -130,6 +131,14 @@ pub trait Backend {
     /// Lets the platform UI (the overlay window) process its events. Called
     /// once per frame.
     fn pump(&mut self) {}
+    /// Waits for the next frame while something is moving: at most
+    /// `remaining` by the clock, or until the display refreshes, for a
+    /// backend that can tell.
+    fn wait_frame(&mut self, remaining: Duration, _refresh: Duration) {
+        std::thread::sleep(remaining);
+    }
+    /// Nothing is moving any more.
+    fn stop_frames(&mut self) {}
     /// The display's highest refresh rate, in frames per second, to pace
     /// animations to; `None` if unknown.
     fn frame_rate(&mut self) -> Option<f64> {
@@ -142,7 +151,7 @@ pub trait Backend {
         false
     }
     /// Window events delivered since the last call (after `pump`): the only
-    /// way bspx learns that something changed.
+    /// way cberry learns that something changed.
     fn take_events(&mut self) -> Vec<WindowEvent> {
         Vec::new()
     }
@@ -164,7 +173,7 @@ pub trait Backend {
     fn modifier_held(&mut self, _modifier: Modifier) -> bool {
         false
     }
-    /// `bspx ...` command lines from keyboard shortcuts since the last call.
+    /// `cberry ...` command lines from keyboard shortcuts since the last call.
     fn hotkey_commands(&mut self) -> Vec<String> {
         Vec::new()
     }
@@ -226,7 +235,7 @@ pub enum WindowEvent {
     /// opened, minimised or restored, an app launched, quit, hidden, shown
     /// or brought to the front, the Space or the displays changed.
     Changed,
-    /// The window was moved or resized: by the user, by its app, or by bspx
+    /// The window was moved or resized: by the user, by its app, or by cberry
     /// itself.
     Moved(WinId),
 }

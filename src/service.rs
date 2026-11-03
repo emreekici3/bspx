@@ -1,13 +1,13 @@
-//! Running bspx as a launchd user agent: `bspx install`, `start`, `stop`,
+//! Running cberry as a launchd user agent: `cberry install`, `start`, `stop`,
 //! `restart`, `uninstall`. launchd starts it at login and in the background,
 //! so no terminal has to stay open.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub const LABEL: &str = "com.github.emreekici3.bspx";
+pub const LABEL: &str = "com.github.emreekici3.cranberry";
 
-/// Seconds launchd waits before starting bspx again after a crash.
+/// Seconds launchd waits before starting cberry again after a crash.
 const THROTTLE_SECS: u32 = 10;
 
 fn home() -> Result<PathBuf, String> {
@@ -27,8 +27,8 @@ pub fn log_paths() -> (PathBuf, PathBuf) {
     let user = std::env::var("USER").unwrap_or_else(|_| "user".into());
     let dir = std::env::temp_dir();
     (
-        dir.join(format!("bspx_{user}.out.log")),
-        dir.join(format!("bspx_{user}.err.log")),
+        dir.join(format!("cberry_{user}.out.log")),
+        dir.join(format!("cberry_{user}.err.log")),
     )
 }
 
@@ -40,7 +40,7 @@ fn escape(s: &str) -> String {
 }
 
 /// The LaunchAgent for `exe`. `path` is the `PATH` the service runs with,
-/// so `bspxrc` can find `bspx` and anything else it calls.
+/// so `cberryrc` can find `cberry` and anything else it calls.
 pub fn plist(exe: &Path, path: &str, stdout: &Path, stderr: &Path) -> String {
     let exe = escape(&exe.to_string_lossy());
     let path = escape(path);
@@ -141,7 +141,7 @@ fn is_loaded() -> bool {
 pub fn install() -> Result<String, String> {
     let exe = std::env::current_exe()
         .and_then(|p| p.canonicalize())
-        .map_err(|e| format!("cannot find the bspx binary: {e}"))?;
+        .map_err(|e| format!("cannot find the cberry binary: {e}"))?;
     let plist_file = plist_path()?;
     if let Some(dir) = plist_file.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -150,7 +150,7 @@ pub fn install() -> Result<String, String> {
     std::fs::write(&plist_file, plist(&exe, &service_path(&exe), &out, &err))
         .map_err(|e| format!("{}: {e}", plist_file.display()))?;
     Ok(format!(
-        "installed {}\nrun `bspx start` to start it; it will also start at login.",
+        "installed {}\nrun `cberry start` to start it; it will also start at login.",
         plist_file.display()
     ))
 }
@@ -162,7 +162,7 @@ pub fn uninstall() -> Result<String, String> {
     }
     match std::fs::remove_file(&plist_file) {
         Ok(()) => Ok(format!("removed {}", plist_file.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok("bspx was not installed".into()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok("cberry was not installed".into()),
         Err(e) => Err(format!("{}: {e}", plist_file.display())),
     }
 }
@@ -171,8 +171,8 @@ pub fn start() -> Result<String, String> {
     let plist_file = plist_path()?;
     if !plist_file.is_file() {
         return Err(
-            "bspx is not installed as a service; run `bspx install` first \
-                    (or `bspx run` to run it in this terminal)"
+            "cberry is not installed as a service; run `cberry install` first \
+                    (or `cberry run` to run it in this terminal)"
                 .into(),
         );
     }
@@ -182,15 +182,15 @@ pub fn start() -> Result<String, String> {
         launchctl(&["bootstrap", &domain(), &plist_file.to_string_lossy()])?;
     }
     let (_, err) = log_paths();
-    Ok(format!("bspx started (log: {})", err.display()))
+    Ok(format!("cberry started (log: {})", err.display()))
 }
 
 pub fn stop() -> Result<String, String> {
     if !is_loaded() {
-        return Ok("bspx is not running as a service".into());
+        return Ok("cberry is not running as a service".into());
     }
     launchctl(&["bootout", &service_target()])?;
-    Ok("bspx stopped".into())
+    Ok("cberry stopped".into())
 }
 
 pub fn restart() -> Result<String, String> {
@@ -198,7 +198,7 @@ pub fn restart() -> Result<String, String> {
         return start();
     }
     launchctl(&["kickstart", "-k", &service_target()])?;
-    Ok("bspx restarted".into())
+    Ok("cberry restarted".into())
 }
 
 #[cfg(test)]
@@ -208,15 +208,15 @@ mod tests {
     #[test]
     fn plist_runs_the_binary_in_the_foreground() {
         let p = plist(
-            Path::new("/Users/me/.cargo/bin/bspx"),
+            Path::new("/Users/me/.cargo/bin/cberry"),
             "/Users/me/.cargo/bin:/usr/bin",
             Path::new("/tmp/out"),
             Path::new("/tmp/err"),
         );
         assert!(p.contains(&format!("<string>{LABEL}</string>")));
-        assert!(
-            p.contains("<string>/Users/me/.cargo/bin/bspx</string>\n        <string>run</string>")
-        );
+        assert!(p.contains(
+            "<string>/Users/me/.cargo/bin/cberry</string>\n        <string>run</string>"
+        ));
         assert!(p.contains("<key>RunAtLoad</key>\n    <true/>"));
         assert!(p.contains("<string>/Users/me/.cargo/bin:/usr/bin</string>"));
         assert!(p.contains("<string>/tmp/err</string>"));
@@ -225,20 +225,20 @@ mod tests {
     #[test]
     fn plist_escapes_paths() {
         let p = plist(
-            Path::new("/a&b/<bspx>"),
+            Path::new("/a&b/<cberry>"),
             "x",
             Path::new("o"),
             Path::new("e"),
         );
-        assert!(p.contains("/a&amp;b/&lt;bspx&gt;"));
+        assert!(p.contains("/a&amp;b/&lt;cberry&gt;"));
     }
 
     #[test]
     fn service_path_puts_the_binary_first() {
-        let path = service_path(Path::new("/Users/me/.cargo/bin/bspx"));
+        let path = service_path(Path::new("/Users/me/.cargo/bin/cberry"));
         assert!(path.starts_with("/Users/me/.cargo/bin:"));
         assert!(path.contains("/opt/homebrew/bin"));
-        let path = service_path(Path::new("/usr/local/bin/bspx"));
+        let path = service_path(Path::new("/usr/local/bin/cberry"));
         assert_eq!(path.matches("/usr/local/bin").count(), 1);
     }
 }

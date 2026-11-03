@@ -140,7 +140,7 @@ fn spawn(pid: i32) -> Option<Arc<Mailbox>> {
     let mailbox = Arc::new(Mailbox::default());
     let theirs = Arc::clone(&mailbox);
     let spawned = thread::Builder::new()
-        .name(format!("bspx-writer-{pid}"))
+        .name(format!("cberry-writer-{pid}"))
         .spawn(move || run(&theirs));
     match spawned {
         Ok(_) => Some(mailbox),
@@ -233,7 +233,7 @@ fn write(job: &Job, position: &Cf, size: &Cf) {
             })
             .collect();
         debug!(
-            target: "bspx::frames",
+            target: "cranberry::frames",
             "window {} {}: want {} | between {} | after {}",
             job.id,
             order.join(","),

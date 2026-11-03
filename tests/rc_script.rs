@@ -1,13 +1,13 @@
-//! Runs the daemon against a fake window system with a real `bspxrc`,
-//! which configures it through the real `bspx` binary and socket.
+//! Runs the daemon against a fake window system with a real `cberryrc`,
+//! which configures it through the real `cberry` binary and socket.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use bspx::bsp::WinId;
-use bspx::geometry::Rect;
-use bspx::platform::{Backend, WindowInfo};
+use cranberry::bsp::WinId;
+use cranberry::geometry::Rect;
+use cranberry::platform::{Backend, WindowInfo};
 
 #[derive(Clone, Default)]
 struct Fake(Arc<Mutex<Vec<WindowInfo>>>);
@@ -31,19 +31,19 @@ impl Backend for Fake {
 }
 
 #[test]
-fn bspxrc_configures_the_daemon() {
-    let dir = std::env::temp_dir().join(format!("bspx-rc-{}", std::process::id()));
+fn cberryrc_configures_the_daemon() {
+    let dir = std::env::temp_dir().join(format!("cberry-rc-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let socket = dir.join("s.sock");
-    let rc = dir.join("bspxrc");
+    let rc = dir.join("cberryrc");
     std::fs::write(
         &rc,
-        "bspx config gap 20\nbspx config padding 0\nbspx config animation 0\nbspx rule float Notes\n",
+        "cberry config gap 20\ncberry config padding 0\ncberry config animation 0\ncberry rule float Notes\n",
     )
     .unwrap();
 
-    // The script finds `bspx` on PATH and the socket through the environment.
-    let bin_dir = std::path::Path::new(env!("CARGO_BIN_EXE_bspx"))
+    // The script finds `cberry` on PATH and the socket through the environment.
+    let bin_dir = std::path::Path::new(env!("CARGO_BIN_EXE_cberry"))
         .parent()
         .unwrap()
         .to_owned();
@@ -53,7 +53,7 @@ fn bspxrc_configures_the_daemon() {
     .unwrap();
     unsafe {
         std::env::set_var("PATH", path);
-        std::env::set_var("BSPX_SOCKET", &socket);
+        std::env::set_var("CBERRY_SOCKET", &socket);
     }
 
     let fake = Fake::default();
@@ -69,11 +69,11 @@ fn bspxrc_configures_the_daemon() {
             });
         }
     }
-    let server = bspx::ipc::Server::bind(&socket).unwrap();
+    let server = cranberry::ipc::Server::bind(&socket).unwrap();
     let stop = Arc::new(AtomicBool::new(false));
     let daemon = {
         let (fake, stop) = (fake.clone(), stop.clone());
-        std::thread::spawn(move || bspx::daemon::run(fake, Some(rc), server, stop))
+        std::thread::spawn(move || cranberry::daemon::run(fake, Some(rc), server, stop))
     };
 
     let frame = |id: WinId| {
@@ -98,12 +98,12 @@ fn bspxrc_configures_the_daemon() {
     assert_eq!(frame(3), Rect::new(50, 50, 200, 200), "Notes is floating");
 
     // Live change from the command line, like a user in a terminal.
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_bspx"))
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_cberry"))
         .args(["config", "gap"])
         .output()
         .unwrap();
     assert_eq!(String::from_utf8_lossy(&out.stdout), "20\n");
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_bspx"))
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_cberry"))
         .args(["config", "gap", "oops"])
         .output()
         .unwrap();

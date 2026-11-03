@@ -1,14 +1,15 @@
-//! Ties the BSP tree, the animator and a window-system backend together.
+//! Ties the BSP tree, the motion of windows and a window-system backend
+//! together.
 
 use std::collections::{HashMap, HashSet};
 
 use log::{debug, info, warn};
 
-use crate::anim::Animator;
 use crate::bsp::{self, BspTree, WinId};
 use crate::command::{Command, DisplayTarget, Zoom};
 use crate::config::{Config, MouseAction, app_matches};
 use crate::geometry::{Direction, Rect};
+use crate::motion::Mover;
 use crate::platform::{Backend, Display, Modifier, MouseButton, Overlay, WindowEvent, WindowInfo};
 
 /// The layout of a Space (virtual desktop) other than the current one: on
@@ -31,7 +32,7 @@ pub struct Manager<B: Backend> {
     /// The displays tiled, the main one first, from the last look.
     displays: Vec<Display>,
     spaces: HashMap<u64, SpaceState>,
-    anim: Animator,
+    mover: Mover,
     /// Last frame each window was seen at or sent to.
     frames: HashMap<WinId, Rect>,
     apps: HashMap<WinId, String>,
@@ -53,7 +54,7 @@ pub struct Manager<B: Backend> {
     min_sizes: MinSizes,
     /// The layout before the user's latest run of resizes, and when the
     /// last of them was. A window seen to refuse its size right after one
-    /// stops that resize where it fits: the first time bspx learns a
+    /// stops that resize where it fits: the first time cberry learns a
     /// window's minimum is by going past it.
     resize_anchor: Option<ResizeRun>,
     /// The drop highlight on screen, if any.
@@ -63,7 +64,7 @@ pub struct Manager<B: Backend> {
     /// The window focused before the system's focus last moved, and when
     /// (`clock`): see `split_target`.
     focus_moved: Option<(WinId, f64)>,
-    /// The window `bspx zoom` grew over the others on this Space, if any.
+    /// The window `cberry zoom` grew over the others on this Space, if any.
     zoomed: Option<(WinId, Zoom)>,
     area: Rect,
     /// Left mouse button state at the previous frame.
@@ -76,7 +77,7 @@ pub struct Manager<B: Backend> {
     before_drag: HashMap<WinId, Rect>,
     /// Windows on screen, front to back, from the last poll.
     stack: Vec<WinId>,
-    /// Those of them that are real document windows bspx can manage (the
+    /// Those of them that are real document windows cberry can manage (the
     /// rest: dialogs, and the invisible helper windows many apps and tools
     /// keep on screen).
     manageable: HashSet<WinId>,
@@ -174,16 +175,14 @@ const RESIZE_RUN_SECS: f64 = 1.0;
 
 impl<B: Backend> Manager<B> {
     pub fn new(backend: B, config: Config) -> Self {
-        let mut anim = Animator::new(config.animation_speed);
-        anim.set_easing(config.animation_easing);
         Self {
+            mover: Mover::new(config.animation_duration),
             backend,
             config,
             tree: BspTree::new(),
             active_space: 0,
             displays: Vec::new(),
             spaces: HashMap::new(),
-            anim,
             frames: HashMap::new(),
             apps: HashMap::new(),
             floating: HashSet::new(),
@@ -216,7 +215,7 @@ impl<B: Backend> Manager<B> {
         &self.backend
     }
 
-    /// `bspx ...` command lines from keyboard shortcuts.
+    /// `cberry ...` command lines from keyboard shortcuts.
     pub fn hotkey_commands(&mut self) -> Vec<String> {
         self.backend.hotkey_commands()
     }
@@ -260,7 +259,19 @@ impl<B: Backend> Manager<B> {
     }
 
     pub fn is_animating(&self) -> bool {
-        !self.anim.is_idle()
+        !self.mover.at_rest()
+    }
+
+    /// Waits for the next frame of a motion. `remaining` is what is left of
+    /// this one by the clock.
+    pub fn wait_frame(&mut self, remaining: std::time::Duration) {
+        let refresh = self.frame_interval();
+        self.backend.wait_frame(remaining, refresh);
+    }
+
+    /// Nothing is moving any more.
+    pub fn stop_frames(&mut self) {
+        self.backend.stop_frames();
     }
 
     /// Applies new settings. Windows of apps that became floating leave the
@@ -269,8 +280,7 @@ impl<B: Backend> Manager<B> {
         if let Some(level) = config.log_level {
             log::set_max_level(level);
         }
-        self.anim.set_speed(config.animation_speed);
-        self.anim.set_easing(config.animation_easing);
+        self.mover.set_duration(config.animation_duration);
         if config.hotkeys != self.config.hotkeys {
             self.backend.set_hotkeys(&config.hotkeys.join("\n"));
         }
@@ -282,7 +292,7 @@ impl<B: Backend> Manager<B> {
         for id in self.tree.windows() {
             if floats(&self.apps, &self.config, &id) {
                 self.tree.remove(id);
-                self.anim.cancel(id);
+                self.mover.halt(id);
                 if self.focused == Some(id) {
                     self.focused = self.tree.windows().last().copied();
                 }
@@ -330,7 +340,7 @@ impl<B: Backend> Manager<B> {
                     && let Some(state) = self.spaces.get(&d.space)
                 {
                     for id in state.tree.windows() {
-                        self.anim.cancel(id);
+                        self.mover.halt(id);
                     }
                 }
             }
@@ -385,7 +395,7 @@ impl<B: Backend> Manager<B> {
             .collect();
         ids.extend(extra);
         let spaces = self.backend.window_spaces(&ids);
-        // Right after a Space switch the screen still shows windows bspx
+        // Right after a Space switch the screen still shows windows cberry
         // tiles on another Space. Only those count: a window on every Space
         // is always on screen and says nothing.
         let switching = self.all_tiled().iter().any(|(_, id)| {
@@ -400,7 +410,7 @@ impl<B: Backend> Manager<B> {
         if float_spaces.contains(&space) && !self.tree.is_empty() {
             debug!("Space {space} floats: leaving its windows be");
             for id in self.tree.windows() {
-                self.anim.cancel(id);
+                self.mover.halt(id);
             }
             self.tree = BspTree::new();
             self.zoomed = None;
@@ -425,7 +435,7 @@ impl<B: Backend> Manager<B> {
                             && on_display
                             && shown.contains(&s)
                             && !(hands_off
-                                && !self.anim.is_animating(id)
+                                && !self.mover.in_motion(id)
                                 && frames_now.get(&id).is_some_and(|f| {
                                     self.display_of_space(s).is_some_and(|d| {
                                         let (x, y) = f.center();
@@ -499,14 +509,14 @@ impl<B: Backend> Manager<B> {
             .collect();
         let mut new = Vec::new();
         for info in windows {
-            if !self.anim.is_animating(info.id) {
+            if !self.mover.in_motion(info.id) {
                 self.frames.insert(info.id, info.frame);
                 if let Some(&slot) = expected.get(&info.id) {
                     learned |= self.learn_min_size(info.id, slot, info.frame);
                 }
             }
             self.apps.insert(info.id, info.app.clone());
-            // A window counts as seen once bspx can manage it: a new one is
+            // A window counts as seen once cberry can manage it: a new one is
             // often listed a poll or two before its Accessibility element
             // turns up, and the rule must still apply then.
             if info.movable && !self.seen.contains(&info.id) {
@@ -693,7 +703,7 @@ impl<B: Backend> Manager<B> {
             area.align_in(cell, info.frame.w, info.frame.h)
         };
         self.floating.insert(id);
-        self.anim.cancel(id);
+        self.mover.halt(id);
         self.backend.update_frame(id, frame, info.frame);
         self.frames.insert(id, frame);
         info!("window {id} of {app} floats at grid {grid:?}: {frame:?}");
@@ -809,7 +819,7 @@ impl<B: Backend> Manager<B> {
         (tree, Some(stopper))
     }
 
-    /// Reacts to window events, the only way bspx learns that something
+    /// Reacts to window events, the only way cberry learns that something
     /// changed. A closed window leaves the layout at once, so its neighbours
     /// fill the gap (animated, or instantly with `animation 0`). Returns
     /// whether the window list should be read again now.
@@ -838,11 +848,11 @@ impl<B: Backend> Manager<B> {
                     debug!("event: something changed");
                     refresh = true;
                 }
-                // While bspx animates, the moves are mostly its own: one
+                // While cberry animates, the moves are mostly its own: one
                 // look once the animation ends covers them. While the mouse
                 // is down, the user is dragging: the release takes a look.
                 WindowEvent::Moved(_) => {
-                    refresh |= self.anim.is_idle() && !self.backend.mouse_down();
+                    refresh |= self.mover.at_rest() && !self.backend.mouse_down();
                 }
             }
         }
@@ -856,7 +866,7 @@ impl<B: Backend> Manager<B> {
     fn switch_space(&mut self, space: u64) {
         debug!("Space {} -> {space}", self.active_space);
         for id in self.tree.windows() {
-            self.anim.cancel(id);
+            self.mover.halt(id);
         }
         if std::mem::replace(&mut self.drag, Drag::None) != Drag::None {
             self.set_overlay(None);
@@ -902,7 +912,7 @@ impl<B: Backend> Manager<B> {
     }
 
     /// The Space of the current display: the one with the focused window
-    /// (before bspx has first looked, the main display's).
+    /// (before cberry has first looked, the main display's).
     fn current_space(&mut self) -> u64 {
         if self.displays.is_empty() {
             self.backend.active_space()
@@ -912,7 +922,7 @@ impl<B: Backend> Manager<B> {
     }
 
     /// The Spaces the displays show, the main display's first. Never empty
-    /// once bspx has looked: before that, the current Space.
+    /// once cberry has looked: before that, the current Space.
     fn shown_spaces(&self) -> Vec<u64> {
         if self.displays.is_empty() {
             return vec![self.active_space];
@@ -1111,7 +1121,7 @@ impl<B: Backend> Manager<B> {
     /// Asks the system which window has focus and follows it, but only
     /// when the answer changed: the system's answer can lag or get stuck
     /// (the Accessibility API is slow to notice a click), and a stale one
-    /// must not undo a focus change bspx saw first. Returns the answer.
+    /// must not undo a focus change cberry saw first. Returns the answer.
     fn sync_focus(&mut self) -> Option<WinId> {
         let now = self.backend.focused_window();
         self.note_focus(now);
@@ -1151,7 +1161,7 @@ impl<B: Backend> Manager<B> {
     }
 
     fn remove_from_space(&mut self, space: u64, id: WinId) {
-        self.anim.cancel(id);
+        self.mover.halt(id);
         if space == self.active_space {
             self.tree.remove(id);
         } else if let Some(state) = self.spaces.get_mut(&space) {
@@ -1267,7 +1277,7 @@ impl<B: Backend> Manager<B> {
         }
     }
 
-    /// The frontmost window bspx manages at a point, from the last poll.
+    /// The frontmost window cberry manages at a point, from the last poll.
     /// Helper windows that only look like windows are looked through.
     fn window_under(&self, x: f32, y: f32) -> Option<WinId> {
         self.stack
@@ -1324,7 +1334,7 @@ impl<B: Backend> Manager<B> {
                 self.tree
                     .windows()
                     .into_iter()
-                    .filter(|id| !self.anim.is_animating(*id))
+                    .filter(|id| !self.mover.in_motion(*id))
                     .find(hit)
             })
         });
@@ -1397,7 +1407,7 @@ impl<B: Backend> Manager<B> {
             self.zoomed = None;
             self.relayout();
         }
-        self.anim.cancel(win);
+        self.mover.halt(win);
         self.backend.focus(win);
         if tiled {
             self.focused = Some(win);
@@ -1628,7 +1638,7 @@ impl<B: Backend> Manager<B> {
     /// Where a tiled window is on screen: its last known frame, or its slot
     /// while it is still sliding there.
     fn drawn_frame(&self, id: WinId, slot: Rect) -> Rect {
-        if self.anim.is_animating(id) {
+        if self.mover.in_motion(id) {
             return slot;
         }
         self.frames.get(&id).copied().unwrap_or(slot)
@@ -1698,7 +1708,7 @@ impl<B: Backend> Manager<B> {
             .tree
             .windows()
             .into_iter()
-            .filter(|id| !self.anim.is_animating(*id))
+            .filter(|id| !self.mover.in_motion(*id))
             .filter_map(|id| {
                 let before = *self.before_drag.get(&id)?;
                 let after = *self.frames.get(&id)?;
@@ -1749,7 +1759,7 @@ impl<B: Backend> Manager<B> {
     /// Advances animations by `dt` seconds and pushes the new frames.
     pub fn tick(&mut self, dt: f64) {
         self.clock += dt;
-        let mut moves = self.anim.step(dt);
+        let mut moves = self.mover.advance(dt);
         // Windows making room go first: a window that grows into the space
         // a neighbour has not left yet would cover it for a frame.
         moves.sort_by_key(|(id, frame)| {
@@ -1759,7 +1769,7 @@ impl<B: Backend> Manager<B> {
         });
         for (id, frame) in moves {
             // The last frame takes the safe order; it is the one that stays.
-            let more = self.anim.is_animating(id);
+            let more = self.mover.in_motion(id);
             match self.frames.insert(id, frame) {
                 Some(prev) if more => self.backend.animate_frame(id, frame, prev),
                 Some(prev) => self.backend.update_frame(id, frame, prev),
@@ -1786,7 +1796,7 @@ impl<B: Backend> Manager<B> {
             .inset(&self.config.padding)
     }
 
-    /// `bspx resize` for a floating window: the rule of tiled ones, with
+    /// `cberry resize` for a floating window: the rule of tiled ones, with
     /// the display's edges for the screen's. `dir` moves its left (top)
     /// edge, or its right (bottom) one when it is against the left (top) of
     /// the display, by `amount` of the display.
@@ -1821,8 +1831,8 @@ impl<B: Backend> Manager<B> {
     /// Where a window is, or will be once its animation ends: a key held
     /// down moves on from there, not from a frame in flight.
     fn heading_of(&self, win: WinId) -> Option<Rect> {
-        self.anim
-            .target(win)
+        self.mover
+            .heading(win)
             .or_else(|| self.frames.get(&win).copied())
     }
 
@@ -1831,7 +1841,7 @@ impl<B: Backend> Manager<B> {
         let Some(&now) = self.frames.get(&win) else {
             return;
         };
-        if let Some(frame) = self.anim.animate_to(win, now, frame) {
+        if let Some(frame) = self.mover.send(win, now, frame) {
             self.backend.update_frame(win, frame, now);
             self.frames.insert(win, frame);
         }
@@ -1910,7 +1920,7 @@ impl<B: Backend> Manager<B> {
     /// while the user drags a border, the windows must keep up with it.
     fn relayout_now(&mut self) {
         for (id, target) in self.targets() {
-            self.anim.cancel(id);
+            self.mover.halt(id);
             let prev = self.frames.get(&id).copied().unwrap_or(target);
             if prev != target {
                 self.backend.update_frame(id, target, prev);
@@ -1935,7 +1945,7 @@ impl<B: Backend> Manager<B> {
                 continue;
             }
             let current = self.frames.get(&id).copied().unwrap_or(target);
-            if let Some(frame) = self.anim.animate_to(id, current, target) {
+            if let Some(frame) = self.mover.send(id, current, target) {
                 self.backend.update_frame(id, frame, current);
                 self.frames.insert(id, frame);
             }
@@ -2114,13 +2124,13 @@ impl<B: Backend> Manager<B> {
                     .ok_or("no window is focused")?;
                 if self.tree.remove(win) {
                     self.floating.insert(win);
-                    self.anim.cancel(win);
+                    self.mover.halt(win);
                     self.focused = self.tree.windows().last().copied();
                     info!("window {win} floating");
                 } else {
                     if self.float_space_ids().contains(&self.active_space) {
                         return Err(
-                            "this Space floats; tile it with `bspx layout <space> bsp`".into()
+                            "this Space floats; tile it with `cberry layout <space> bsp`".into(),
                         );
                     }
                     self.tile(win, self.focused);
@@ -2315,7 +2325,7 @@ impl<B: Backend> Manager<B> {
         ids.sort_unstable();
         let mut out = String::new();
         for id in ids {
-            let f = self.anim.target(id).unwrap_or(self.frames[&id]);
+            let f = self.mover.heading(id).unwrap_or(self.frames[&id]);
             let state = if self.zoomed.is_some_and(|(w, _)| w == id) {
                 "zoomed"
             } else if self.is_tiled_anywhere(id) {
@@ -2329,7 +2339,7 @@ impl<B: Backend> Manager<B> {
                 ""
             };
             let app = self.apps.get(&id).map_or("?", String::as_str);
-            // Which `bspx rule float` floats the window, so a rule that
+            // Which `cberry rule float` floats the window, so a rule that
             // does or does not match is easy to see.
             let rule = if state == "floating" {
                 self.config
@@ -2401,7 +2411,7 @@ pub(crate) mod tests {
         pub events: Vec<WindowEvent>,
         /// Windows that refuse to get smaller than this, like real apps.
         pub min: HashMap<WinId, (i32, i32)>,
-        /// The gesture modifier bspx asked for.
+        /// The gesture modifier cberry asked for.
         pub modifier: Option<Modifier>,
         /// Modifier keys held down.
         pub held: Vec<Modifier>,
@@ -2599,7 +2609,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn manager(speed: f64) -> Manager<MockBackend> {
+    fn manager(animation_duration: f64) -> Manager<MockBackend> {
         let backend = MockBackend {
             area: Rect::new(0, 25, 1000, 600),
             ..Default::default()
@@ -2607,7 +2617,7 @@ pub(crate) mod tests {
         let config = Config {
             gap: 10,
             padding: Padding::default(),
-            animation_speed: speed,
+            animation_duration,
             ..Config::default()
         };
         Manager::new(backend, config)
@@ -2625,7 +2635,7 @@ pub(crate) mod tests {
 
     #[test]
     fn new_windows_are_tiled_and_animated() {
-        let mut m = manager(12.0);
+        let mut m = manager(0.42);
         m.backend.open(1, "Terminal");
         m.refresh();
         assert!(m.is_animating());
@@ -2672,7 +2682,7 @@ pub(crate) mod tests {
     }
 
     /// Opens `n` windows of `app`, each refusing to be smaller than `min`,
-    /// letting bspx see each one settle.
+    /// letting cberry see each one settle.
     fn open_many(m: &mut Manager<MockBackend>, first: WinId, n: u32, app: &str, min: (i32, i32)) {
         for id in first..first + n {
             m.backend.open(id, app);
@@ -3001,38 +3011,28 @@ pub(crate) mod tests {
 
     #[test]
     fn retarget_during_animation_is_smooth() {
-        use crate::anim::Easing;
-        for easing in [Easing::EaseOut, Easing::Spring] {
-            let mut m = manager(12.0);
-            m.anim.set_easing(easing);
-            m.backend.open(1, "a");
-            m.refresh();
-            settle(&mut m);
-            m.backend.open(2, "b");
-            m.refresh();
-            for _ in 0..3 {
-                m.tick(1.0 / 60.0);
-            }
-            let mid = m.backend().frame(1);
-            m.backend.close(2);
-            m.refresh();
+        let mut m = manager(0.42);
+        m.backend.open(1, "a");
+        m.refresh();
+        settle(&mut m);
+        m.backend.open(2, "b");
+        m.refresh();
+        for _ in 0..3 {
             m.tick(1.0 / 60.0);
-            let next = m.backend().frame(1);
-            match easing {
-                // Window 1 turns around from where it was instead of jumping.
-                Easing::EaseOut => {
-                    assert!(next.w > mid.w && next.w < 1000, "{mid:?} -> {next:?}");
-                }
-                // The spring brakes first, then turns: no jump either way.
-                _ => assert!((next.w - mid.w).abs() < 60, "{mid:?} -> {next:?}"),
-            }
-            for _ in 0..6 {
-                m.tick(1.0 / 60.0);
-            }
-            assert!(m.backend().frame(1).w > mid.w, "{easing:?} turned around");
-            settle(&mut m);
-            assert_eq!(m.backend().frame(1), Rect::new(0, 25, 1000, 600));
         }
+        let mid = m.backend().frame(1);
+        m.backend.close(2);
+        m.refresh();
+        m.tick(1.0 / 60.0);
+        let next = m.backend().frame(1);
+        // It brakes first, then turns: no jump either way.
+        assert!((next.w - mid.w).abs() < 60, "{mid:?} -> {next:?}");
+        for _ in 0..12 {
+            m.tick(1.0 / 60.0);
+        }
+        assert!(m.backend().frame(1).w > mid.w, "turned around");
+        settle(&mut m);
+        assert_eq!(m.backend().frame(1), Rect::new(0, 25, 1000, 600));
     }
 
     /// Simulates the user dragging window `id` to `frame` with the mouse,
@@ -3054,7 +3054,7 @@ pub(crate) mod tests {
 
     /// Three windows: Terminal (1) over Finder (3) on the left, Claude (2) on the right.
     fn three_windows() -> Manager<MockBackend> {
-        let mut m = manager(12.0);
+        let mut m = manager(0.42);
         m.backend.open(1, "Terminal");
         m.backend.open(2, "Claude");
         m.refresh();
@@ -3165,7 +3165,7 @@ pub(crate) mod tests {
 
     #[test]
     fn mouse_resize_moves_the_border() {
-        let mut m = manager(12.0);
+        let mut m = manager(0.42);
         m.backend.open(1, "a");
         m.backend.open(2, "b");
         m.refresh();
@@ -3183,7 +3183,7 @@ pub(crate) mod tests {
     #[test]
     fn mouse_resize_with_a_size_rounding_neighbour() {
         // Three windows: 1 on the left, 2 and 3 stacked on the right.
-        let mut m = manager(12.0);
+        let mut m = manager(0.42);
         for id in 1..=3 {
             m.backend.open(id, "a");
             m.refresh();
@@ -3206,7 +3206,7 @@ pub(crate) mod tests {
     #[test]
     fn mouse_resize_single_window_next_to_a_stack() {
         // Two windows stacked on the left (1 over 3), one on the right (2).
-        let mut m = manager(12.0);
+        let mut m = manager(0.42);
         m.backend.open(1, "a");
         m.backend.open(2, "b");
         m.refresh();
@@ -3234,7 +3234,7 @@ pub(crate) mod tests {
 
     #[test]
     fn mouse_move_snaps_back() {
-        let mut m = manager(12.0);
+        let mut m = manager(0.42);
         m.backend.open(1, "a");
         m.backend.open(2, "b");
         m.refresh();
@@ -3549,7 +3549,7 @@ pub(crate) mod tests {
 
     #[test]
     fn modifier_drag_dropped_nowhere_returns_the_window() {
-        let mut m = manager(12.0);
+        let mut m = manager(0.42);
         m.backend.open(1, "Terminal");
         m.backend.open(2, "Safari");
         m.refresh();
@@ -3594,7 +3594,7 @@ pub(crate) mod tests {
 
     #[test]
     fn modifier_resize_follows_the_pointer_without_lag() {
-        let mut m = manager(12.0);
+        let mut m = manager(0.42);
         m.backend.open(1, "Terminal");
         m.backend.open(2, "Safari");
         m.refresh();
@@ -3647,7 +3647,7 @@ pub(crate) mod tests {
 
     #[test]
     fn modifier_click_on_a_window_still_animating_does_not_swap() {
-        let mut m = manager(12.0);
+        let mut m = manager(0.42);
         m.backend.open(1, "Terminal");
         m.backend.open(2, "Safari");
         m.refresh();
@@ -4018,7 +4018,7 @@ pub(crate) mod tests {
         open_on(&mut m, 1, 10);
         open_on(&mut m, 2, 10);
         open_on(&mut m, 3, 20);
-        // Moved there some other way than bspx (the Window menu, say).
+        // Moved there some other way than cberry (the Window menu, say).
         m.backend.space_of.insert(1, 20);
         m.backend
             .windows
@@ -4229,7 +4229,7 @@ pub(crate) mod tests {
         // Already floating: it just moves to another cell.
         m.execute(&Command::Grid([2, 2, 0, 1, 1, 1])).unwrap();
         assert_eq!(m.backend().frame(2), Rect::new(0, 325, 500, 300));
-        // And `bspx float` tiles it again.
+        // And `cberry float` tiles it again.
         m.execute(&Command::ToggleFloat).unwrap();
         assert_eq!(m.tree().windows(), vec![1, 2]);
     }
@@ -4326,7 +4326,7 @@ pub(crate) mod tests {
 
     #[test]
     fn grid_and_floating_resize_animate() {
-        let mut m = manager(12.0);
+        let mut m = manager(0.42);
         m.backend.open(1, "Notes");
         m.backend.open(2, "Mail");
         m.refresh();
@@ -4559,7 +4559,7 @@ pub(crate) mod tests {
         assert_eq!(m.config().gap, 20);
 
         m.execute(&cmd("config animation 0.25")).unwrap();
-        assert_eq!(m.config().animation_speed, 20.0);
+        assert_eq!(m.config().animation_duration, 0.25);
 
         m.execute(&cmd("rule float Finder")).unwrap();
         assert_eq!(m.tree().windows(), vec![1]);
@@ -4748,12 +4748,12 @@ pub(crate) mod tests {
         let mut m = manager(0.0);
         let bind =
             |m: &mut Manager<MockBackend>, line: &str| m.execute(&Command::parse(line).unwrap());
-        assert!(bind(&mut m, "bind alt - left  : bspx focus left").is_ok());
-        assert!(bind(&mut m, "bind shift + alt - 1 : bspx send 1").is_ok());
+        assert!(bind(&mut m, "bind alt - left  : cberry focus left").is_ok());
+        assert!(bind(&mut m, "bind shift + alt - 1 : cberry send 1").is_ok());
         assert!(bind(&mut m, "bind alt - : broken").is_err());
         assert_eq!(
             bind(&mut m, "bind").unwrap(),
-            "alt - left  : bspx focus left\nshift + alt - 1 : bspx send 1\n"
+            "alt - left  : cberry focus left\nshift + alt - 1 : cberry send 1\n"
         );
     }
 
@@ -4768,7 +4768,7 @@ pub(crate) mod tests {
 
     #[test]
     fn closed_window_is_replaced_at_once() {
-        for speed in [12.0, 0.0] {
+        for speed in [0.42, 0.0] {
             let mut m = manager(speed);
             m.backend.open(1, "Terminal");
             m.backend.open(2, "Safari");
@@ -4852,7 +4852,7 @@ pub(crate) mod tests {
     #[test]
     fn a_window_makes_room_before_its_neighbour_grows_into_it() {
         for (grow, dir) in [(1, Direction::Right), (2, Direction::Left)] {
-            let mut m = manager(12.0);
+            let mut m = manager(0.42);
             m.backend.open(1, "a");
             m.refresh();
             m.backend.open(2, "b");
@@ -4873,7 +4873,7 @@ pub(crate) mod tests {
     }
     #[test]
     fn an_animation_lands_with_a_final_write() {
-        let mut m = manager(12.0);
+        let mut m = manager(0.42);
         m.backend.open(1, "a");
         m.refresh();
         m.backend.open(2, "b");
@@ -4904,20 +4904,20 @@ pub(crate) mod tests {
         }
     }
     #[test]
-    fn a_move_asks_for_a_look_only_when_bspx_is_not_the_one_moving() {
-        let mut m = manager(12.0);
+    fn a_move_asks_for_a_look_only_when_cberry_is_not_the_one_moving() {
+        let mut m = manager(0.42);
         m.backend.open(1, "a");
         m.refresh();
         settle(&mut m);
         // Idle: the user or the app moved the window.
         m.backend.events.push(WindowEvent::Moved(1));
         assert!(m.handle_events(), "an outside move is looked at");
-        // Animating: bspx's own frames; the end of the animation looks.
+        // Animating: cberry's own frames; the end of the animation looks.
         m.backend.open(2, "b");
         m.refresh();
         assert!(m.is_animating());
         m.backend.events.push(WindowEvent::Moved(1));
-        assert!(!m.handle_events(), "bspx's own moves are not");
+        assert!(!m.handle_events(), "cberry's own moves are not");
         settle(&mut m);
         // The mouse is down: the user is dragging; the release looks.
         m.backend.mouse = true;
@@ -4980,7 +4980,7 @@ pub(crate) mod tests {
     }
     #[test]
     fn animation_frames_follow_the_display() {
-        let mut m = manager(12.0);
+        let mut m = manager(0.42);
         let ms = |m: &mut Manager<MockBackend>| m.frame_interval().as_secs_f64() * 1000.0;
         assert!(
             (ms(&mut m) - 8.33).abs() < 0.01,

@@ -2,7 +2,7 @@
 //! (like the mouse tap: macOS holds each key press until the tap answers),
 //! and the keyboard layout, to know which key types which character.
 //!
-//! The tap only looks the press up. A `bspx ...` command is queued for the
+//! The tap only looks the press up. A `cberry ...` command is queued for the
 //! daemon's loop; anything else goes to the shell from another thread.
 
 use std::collections::HashMap;
@@ -105,7 +105,7 @@ const DEV_LALT: u64 = 0x0000_0020;
 const DEV_RALT: u64 = 0x0000_0040;
 const DEV_RCTRL: u64 = 0x0000_2000;
 
-/// How often the tap thread checks that bspx may still use Accessibility,
+/// How often the tap thread checks that cberry may still use Accessibility,
 /// in seconds.
 const TRUST_CHECK_SECS: f64 = 0.25;
 /// How often the keyboard layout is checked for a change.
@@ -113,7 +113,7 @@ const LAYOUT_CHECK: Duration = Duration::from_secs(1);
 
 /// The shortcuts the tap matches against.
 static HOTKEYS: Mutex<Option<Hotkeys>> = Mutex::new(None);
-/// `bspx ...` command lines for the daemon.
+/// `cberry ...` command lines for the daemon.
 static LINES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static SHELL: OnceLock<Mutex<Sender<String>>> = OnceLock::new();
 static TAP: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
@@ -214,7 +214,7 @@ fn keyboard_layout() -> Option<(String, HashMap<char, u16>)> {
     }
 }
 
-/// Keeps the shortcuts in step with bspxrc and the keyboard layout; lives
+/// Keeps the shortcuts in step with cberryrc and the keyboard layout; lives
 /// on the daemon's thread.
 #[derive(Default)]
 pub struct HotkeyManager {
@@ -274,7 +274,7 @@ impl HotkeyManager {
         }
     }
 
-    /// The `bspx ...` command lines pressed since the last call.
+    /// The `cberry ...` command lines pressed since the last call.
     pub fn take_lines(&mut self) -> Vec<String> {
         LINES
             .lock()
@@ -283,8 +283,8 @@ impl HotkeyManager {
     }
 }
 
-/// `PATH` with bspx's own directory first, so commands find `bspx`.
-fn path_with_bspx() -> Option<std::ffi::OsString> {
+/// `PATH` with cberry's own directory first, so commands find `cberry`.
+fn path_with_cberry() -> Option<std::ffi::OsString> {
     let dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
     let path_var = std::env::var_os("PATH").unwrap_or_default();
     let mut dirs = vec![dir];
@@ -298,10 +298,10 @@ fn shell() -> &'static Mutex<Sender<String>> {
     SHELL.get_or_init(|| {
         let (tx, rx) = channel::<String>();
         let spawned = std::thread::Builder::new()
-            .name("bspx-shortcut-shell".into())
+            .name("cberry-shortcut-shell".into())
             .spawn(move || {
                 let sh = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-                let path = path_with_bspx();
+                let path = path_with_cberry();
                 for command in rx {
                     let mut cmd = Process::new(&sh);
                     cmd.arg("-c").arg(&command);
@@ -328,8 +328,8 @@ fn shell() -> &'static Mutex<Sender<String>> {
 
 fn run(action: Action) {
     match action {
-        Action::Bspx(line) => {
-            debug!("shortcut: bspx {line}");
+        Action::Cberry(line) => {
+            debug!("shortcut: cberry {line}");
             if let Ok(mut l) = LINES.lock() {
                 l.push(line);
             }
@@ -346,7 +346,7 @@ fn run(action: Action) {
 fn start() {
     let _ = shell();
     let spawned = std::thread::Builder::new()
-        .name("bspx-keyboard".into())
+        .name("cberry-keyboard".into())
         .spawn(|| unsafe {
             let tap = CGEventTapCreate(
                 SESSION_EVENT_TAP,
