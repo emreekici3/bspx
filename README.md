@@ -2,8 +2,6 @@
 
 A BSP tiling window manager for macOS. Every Space and display keeps its own layout. SIP stays on.
 
-<img src="assets/demo/balance-v2.gif" width="800" alt="cranberry balancing a layout">
-
 ## Install
 
 You need [Rust](https://rustup.rs).
