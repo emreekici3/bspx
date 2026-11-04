@@ -69,6 +69,11 @@ pub trait Backend {
     fn move_to_space(&mut self, _id: WinId, _space: u64) -> bool {
         false
     }
+    /// Moves a window to another Space without touching the pointer or
+    /// taking the user there; returns whether it could.
+    fn place_on_space(&mut self, _id: WinId, _space: u64) -> bool {
+        false
+    }
     /// Every window that still exists, on any Space, minimised or hidden
     /// ones included. `None` if the backend cannot tell; then a window that
     /// is not on screen counts as closed.

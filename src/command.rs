@@ -83,6 +83,10 @@ pub enum Command {
     Bind(Option<String>),
     /// List managed windows.
     Query,
+    /// List managed windows as JSON.
+    QueryJson,
+    /// The version of the running window manager.
+    DaemonVersion,
     /// Stop the window manager.
     Quit,
 }
@@ -100,16 +104,18 @@ commands:
   raise-floating                           bring floating windows to the front
   grid <r:c:x:y:w:h>                       float the focused window at a grid cell,
                                            e.g. grid 6:6:1:1:4:4 (centred)
-  space <space>                            switch to a Space
+  space <space>                            switch to a Space, also next, prev or recent
   layout <space> <bsp|float>               tile a Space, or leave its windows be
-  send <space>                             move the focused window to a Space
+  send <space>                             move the focused window to a Space, also next,
+                                           prev or recent
   send-display <next|prev|n>               move the focused window to another display
-  retile | reload | query | quit
+  query [--json]                           list windows
+  retile | reload | quit
 
 settings (put these in ~/.config/cranberry/cberryrc):
   config <key> [value]       e.g. config animation 0.25, config gap 10
                              keys: gap, padding, animation_duration (alias animation),
-                             split_ratio, resize_step, poll_interval
+                             split_ratio, resize_step, rule_carry, poll_interval
   rule <float|tile> <app>    e.g. rule float System Settings
   rule space <space> <app>   e.g. rule space web Safari
   rule grid <r:c:x:y:w:h> <app>
@@ -177,7 +183,12 @@ impl Command {
                 let rest = line.trim_start().strip_prefix("bind").unwrap_or("").trim();
                 return Ok(Command::Bind((!rest.is_empty()).then(|| rest.to_string())));
             }
-            Some("query") => no_args(Command::Query)?,
+            Some("query") => match words.get(1).copied() {
+                None => Command::Query,
+                Some("--json") => Command::QueryJson,
+                Some(other) => return Err(format!("query: unknown option '{other}'")),
+            },
+            Some("daemon-version") => no_args(Command::DaemonVersion)?,
             Some("quit") => no_args(Command::Quit)?,
             Some("config") => {
                 let key = words.get(1).ok_or("config: missing setting name")?;
@@ -294,6 +305,7 @@ impl Command {
             | Command::BalanceArea
             | Command::Zoom(_)
             | Command::Grid(_)
+            | Command::QueryJson
             | Command::Send(_)
             | Command::SendDisplay(_)
             | Command::Space(_) => 2,
@@ -386,6 +398,11 @@ mod tests {
         assert!(Command::parse("rule grid 4:4:0:0:1 Finder").is_err());
         assert!(Command::parse("rule grid a:4:0:0:1:1 Finder").is_err());
         assert_eq!(Command::parse("send 3"), Ok(Command::Send("3".into())));
+        assert_eq!(
+            Command::parse("send next"),
+            Ok(Command::Send("next".into()))
+        );
+        assert!(Command::parse("send 3 now").is_err());
         assert_eq!(
             Command::parse("space web"),
             Ok(Command::Space("web".into()))
@@ -510,5 +527,12 @@ mod tests {
         assert!(Command::parse("config").is_err());
         assert!(Command::parse("rule float").is_err());
         assert!(Command::parse("rule hide Finder").is_err());
+    }
+
+    #[test]
+    fn query_can_ask_for_json() {
+        assert_eq!(Command::parse("query"), Ok(Command::Query));
+        assert_eq!(Command::parse("query --json"), Ok(Command::QueryJson));
+        assert!(Command::parse("query --xml").is_err());
     }
 }

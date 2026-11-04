@@ -30,6 +30,9 @@ pub struct Config {
     pub poll_interval_ms: u64,
     /// Apps (by name, e.g. "System Settings") whose windows are never tiled.
     pub float_apps: Vec<String>,
+    /// A Space rule may carry a new window there by its title bar, taking
+    /// the pointer and the user along, when nothing else moves it.
+    pub rule_carry: bool,
     /// Dropping a dragged window onto another one swaps them.
     pub drag_swap: bool,
     /// Drop-target highlight colour, RGBA in 0..=1.
@@ -102,6 +105,7 @@ impl Default for Config {
                 "Calculator".into(),
                 "Archive Utility".into(),
             ],
+            rule_carry: true,
             drag_swap: true,
             drag_color: [0.37, 0.62, 1.0, 0.25],
             mouse_modifier: Some(Modifier::Alt),
@@ -138,6 +142,7 @@ pub const KEYS: &[&str] = &[
     "split_ratio",
     "resize_step",
     "poll_interval",
+    "rule_carry",
     "drag_swap",
     "drag_color",
     "mouse_modifier",
@@ -363,6 +368,7 @@ impl Config {
                 self.poll_interval_ms = v;
             }
             "drag_swap" => self.drag_swap = on_off(key, one(key, args)?)?,
+            "rule_carry" => self.rule_carry = on_off(key, one(key, args)?)?,
             "mouse_follows_focus" => self.mouse_follows_focus = on_off(key, one(key, args)?)?,
             "focus_follows_mouse" => self.focus_follows_mouse = on_off(key, one(key, args)?)?,
             "log_level" => {
@@ -433,6 +439,7 @@ impl Config {
             "resize_step" => self.resize_step.to_string(),
             "poll_interval" | "poll_interval_ms" => self.poll_interval_ms.to_string(),
             "drag_swap" => on_off_name(self.drag_swap),
+            "rule_carry" => on_off_name(self.rule_carry),
             "mouse_follows_focus" => on_off_name(self.mouse_follows_focus),
             "focus_follows_mouse" => on_off_name(self.focus_follows_mouse),
             "log_level" => self

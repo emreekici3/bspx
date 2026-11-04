@@ -4,6 +4,7 @@ pub mod bsp;
 pub mod command;
 pub mod config;
 pub mod daemon;
+pub mod doctor;
 pub mod geometry;
 pub mod hotkeys;
 pub mod ipc;

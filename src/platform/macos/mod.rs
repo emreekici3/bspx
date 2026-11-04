@@ -211,6 +211,11 @@ fn window_id(element: AXUIElementRef) -> Option<WinId> {
 
 /// Returns whether cberry may use the Accessibility API, asking the user for
 /// permission (system dialog) when `prompt` is set.
+/// Whether the *Switch to Desktop N* shortcut is on.
+pub fn desktop_shortcut_on(n: usize) -> bool {
+    desktop::shortcut(n).is_ok()
+}
+
 pub fn ensure_accessibility(prompt: bool) -> bool {
     unsafe {
         let key = kAXTrustedCheckOptionPrompt;
@@ -588,7 +593,7 @@ struct SpaceApi {
 }
 
 /// A tag no real Space uses, to address one Space while moving windows.
-const MOVE_TAG: i32 = 0x6273_7078;
+const MOVE_TAG: i32 = 0x6362_7279;
 
 impl SpaceApi {
     fn new() -> Self {
@@ -977,6 +982,10 @@ pub struct MacBackend {
     overlay: Option<OverlayWindow>,
     /// Write the frames, a thread per app.
     vsync: vsync::Vsync,
+    /// Whether the window server may still heed these ways of moving a
+    /// window to another Space.
+    tag_moves: bool,
+    direct_moves: bool,
     writers: writer::Writers,
     /// The main display's highest refresh rate, frames per second.
     frame_rate: Option<f64>,
@@ -1012,6 +1021,8 @@ impl MacBackend {
             connection: unsafe { CGSMainConnectionID() },
             overlay: None,
             vsync: vsync::Vsync::default(),
+            tag_moves: true,
+            direct_moves: true,
             writers: writer::Writers::default(),
             frame_rate: None,
             dock: DockApi::new(),
@@ -1475,24 +1486,37 @@ impl Backend for MacBackend {
     }
 
     fn move_to_space(&mut self, id: WinId, space: u64) -> bool {
-        let wid = i64::from(id);
-        let number = Cf::owned(unsafe {
-            CFNumberCreate(ptr::null(), kCFNumberSInt64Type, (&raw const wid).cast())
-        });
-        // Trust only what the window server says afterwards.
-        self.space_api.move_by_tag(self.connection, id, space);
-        let mut moved = self.window_spaces(&[id]).get(&id) == Some(&space);
-        if !moved {
-            self.space_api.move_direct(self.connection, space, number);
-            moved = self.window_spaces(&[id]).get(&id) == Some(&space);
-        }
-        if !moved {
-            moved = self.carry(id, space);
-        }
+        let moved = self.place_on_space(id, space) || self.carry(id, space);
         if !moved {
             warn!("macOS did not move window {id} to Space {space}");
         }
         moved
+    }
+
+    fn place_on_space(&mut self, id: WinId, space: u64) -> bool {
+        // Trust only what the window server says afterwards. A call it
+        // ignored once it will ignore again: no use waiting for it each time.
+        if self.tag_moves {
+            self.space_api.move_by_tag(self.connection, id, space);
+            if self.window_spaces(&[id]).get(&id) == Some(&space) {
+                return true;
+            }
+            self.tag_moves = false;
+            debug!("moving windows by tag does not work here");
+        }
+        if self.direct_moves {
+            let wid = i64::from(id);
+            let number = Cf::owned(unsafe {
+                CFNumberCreate(ptr::null(), kCFNumberSInt64Type, (&raw const wid).cast())
+            });
+            self.space_api.move_direct(self.connection, space, number);
+            if self.window_spaces(&[id]).get(&id) == Some(&space) {
+                return true;
+            }
+            self.direct_moves = false;
+            debug!("moving windows directly does not work here");
+        }
+        false
     }
 
     fn switch_to_space(&mut self, n: usize) -> Result<(), String> {

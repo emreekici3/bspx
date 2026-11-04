@@ -24,7 +24,16 @@ cberry bind 'shift + alt - 3 : cberry send 3'
 
 `cberry layout coding float` stops tiling Space 3: its windows stay where you put them, and `alt`-drags still move and resize them. `cberry layout coding bsp` tiles it again.
 
-These use the macOS *Switch to Desktop N* shortcuts, so turn them on first: *System Settings → Keyboard → Keyboard Shortcuts → Mission Control*. With SIP enabled, recent macOS only lets a window change Spaces the way a person does it, so cranberry holds the window by its title bar and switches Spaces: you go along with it.
+`next` and `prev` go round the Spaces of the display, and `recent` goes back to the last one:
+
+```sh
+cberry bind 'alt - tab : cberry space recent'
+cberry bind 'alt - right : cberry space next'
+cberry bind 'alt - left : cberry space prev'
+cberry bind 'shift + alt - right : cberry send next'
+```
+
+These use the macOS *Switch to Desktop N* shortcuts, so turn them on first: *System Settings → Keyboard → Keyboard Shortcuts → Mission Control*. With SIP enabled, recent macOS only lets a window change Spaces the way a person does it, so cranberry holds the window by its title bar and switches Spaces: you go along with it. A Space rule does the same to a new window; `cberry config rule_carry off` leaves the pointer alone, and the window stays on the current Space.
 
 ## Displays
 

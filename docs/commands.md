@@ -33,8 +33,8 @@
 
 | Command | What it does |
 |---|---|
-| `cberry space <space>` | Switch to a Space |
-| `cberry send <space>` | Move the focused window to a Space |
+| `cberry space <space>` | Switch to a Space: a number, a label, `next`, `prev` or `recent` |
+| `cberry send <space>` | Move the focused window to a Space, by the same names |
 | `cberry send-display <next\|prev\|n>` | Move the focused window to another display |
 | `cberry label [<n> <name>]` | Name Space `n`; alone, list the Spaces |
 | `cberry layout <space> bsp\|float` | Tile a Space, or leave its windows where you put them |
@@ -57,7 +57,8 @@
 | `cberry reload` | Reload the config |
 | `cberry config <key> [value]` | Show or change a setting |
 | `cberry bind ['<hotkey>']` | Add a keyboard shortcut; alone, list them |
-| `cberry query` | List windows with their app names |
+| `cberry query [--json]` | List windows with their app names |
+| `cberry doctor` | Check the setup and say what to fix |
 | `cberry version` | Print the version |
 
 [Back to the README](../README.md)

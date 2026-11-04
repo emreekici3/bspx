@@ -9,7 +9,7 @@
 use std::ffi::c_void;
 use std::ptr;
 use std::thread::sleep;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::ffi::*;
 use super::{Cf, bool_value, cfstring, i64_value, string_value};
@@ -48,6 +48,15 @@ const LEFT_MOUSE_DOWN: u32 = 1;
 const LEFT_MOUSE_UP: u32 = 2;
 const LEFT_MOUSE_DRAGGED: u32 = 6;
 const LEFT_BUTTON: u32 = 0;
+
+/// How long to wait for the keys of the shortcut that asked for a carry to
+/// come up: held down, they would go along with the keys and the drag.
+const KEYS_UP: Duration = Duration::from_millis(500);
+/// A switch is under way at least this long, even if the window server
+/// already lists the window on the new Space.
+const SWITCH_LEAST: Duration = Duration::from_millis(250);
+/// The most a switch is given before the window is let go.
+const SWITCH_MOST: Duration = Duration::from_millis(600);
 
 /// Desktop n's shortcut has this id in `com.apple.symbolichotkeys`.
 const FIRST_DESKTOP_HOTKEY: usize = 117;
@@ -193,6 +202,10 @@ pub fn carry(
     mut moved: impl FnMut() -> bool,
 ) -> Result<(), String> {
     let (keycode, flags) = shortcut(n)?;
+    let waited = Instant::now();
+    while super::tap::any_held() && waited.elapsed() < KEYS_UP {
+        sleep(Duration::from_millis(10));
+    }
     let (x, y) = grab_point(system, pid, frame)
         .ok_or_else(|| format!("window {wid} has no title bar to hold it by"))?;
     let back =
@@ -205,7 +218,11 @@ pub fn carry(
     sleep(Duration::from_millis(60));
     post_key(keycode, flags);
     // The switch animation, with the window held.
-    sleep(Duration::from_millis(450));
+    let switched = Instant::now();
+    sleep(SWITCH_LEAST);
+    while !moved() && switched.elapsed() < SWITCH_MOST {
+        sleep(Duration::from_millis(25));
+    }
     post_mouse(LEFT_MOUSE_UP, x + 1.0, y);
     if let Some(p) = back {
         unsafe {

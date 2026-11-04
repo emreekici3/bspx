@@ -25,6 +25,7 @@ cberry reload
 | `animation` | Animation duration in seconds, `0` to disable | `0.42` |
 | `split_ratio` | Share the old window keeps when split | `0.5` |
 | `resize_step` | Step for `cberry resize` | `0.05` |
+| `rule_carry` | Let a Space rule carry a new window there, pointer and all, `on` / `off` | `on` |
 | `drag_swap` | Swap windows by drag and drop, `on` / `off` | `on` |
 | `drag_color` | Drop highlight colour, `RRGGBB` or `RRGGBBAA` | `5e9eff40` |
 | `mouse_modifier` | Key to hold for mouse moves and resizes: `alt`, `cmd`, `ctrl`, `shift`, `fn` or `off` | `alt` |

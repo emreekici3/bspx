@@ -41,6 +41,23 @@ fn escape(s: &str) -> String {
 
 /// The LaunchAgent for `exe`. `path` is the `PATH` the service runs with,
 /// so `cberryrc` can find `cberry` and anything else it calls.
+/// The binary a service plist runs.
+fn binary_in_plist(text: &str) -> Option<&str> {
+    let (_, rest) = text.split_once("<key>ProgramArguments</key>")?;
+    let (_, rest) = rest.split_once("<string>")?;
+    rest.split_once("</string>").map(|(path, _)| path)
+}
+
+/// The binary the installed service runs, if one is installed.
+pub fn binary() -> Option<PathBuf> {
+    let text = std::fs::read_to_string(plist_path().ok()?).ok()?;
+    let path = binary_in_plist(&text)?
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&");
+    Some(PathBuf::from(path))
+}
+
 pub fn plist(exe: &Path, path: &str, stdout: &Path, stderr: &Path) -> String {
     let exe = escape(&exe.to_string_lossy());
     let path = escape(path);
@@ -263,6 +280,18 @@ mod tests {
             stable_path(Path::new("/usr/local/Cellar/cranberry/0.2.2_1/bin/cberry")),
             Path::new("/usr/local/opt/cranberry/bin/cberry")
         );
+    }
+
+    #[test]
+    fn the_binary_is_read_back_from_the_plist() {
+        let text = plist(
+            Path::new("/a/cberry"),
+            "/usr/bin",
+            Path::new("/o"),
+            Path::new("/e"),
+        );
+        assert_eq!(binary_in_plist(&text), Some("/a/cberry"));
+        assert_eq!(binary_in_plist("<plist/>"), None);
     }
 
     #[test]

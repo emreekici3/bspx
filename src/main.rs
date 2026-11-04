@@ -1,7 +1,7 @@
 use std::process::ExitCode;
 
 use cranberry::command::{Command, USAGE};
-use cranberry::ipc;
+use cranberry::{doctor, ipc};
 
 fn print_help() {
     println!("cberry - animated BSP tiling window manager for macOS\n");
@@ -12,7 +12,8 @@ fn print_help() {
     println!("  cberry restart            restart the service");
     println!("  cberry uninstall          remove the service");
     println!("  cberry run                run in this terminal instead (for debugging)");
-    println!("  cberry version            print the version\n");
+    println!("  cberry version            print the version");
+    println!("  cberry doctor             find out what is wrong\n");
     println!("{USAGE}");
 }
 
@@ -39,6 +40,15 @@ fn main() -> ExitCode {
         Some("-v" | "--version" | "version") => {
             println!("cberry {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
+        }
+        Some("doctor") => {
+            let checks = doctor::checks(&doctor::facts(), env!("CARGO_PKG_VERSION"));
+            print!("{}", doctor::report(&checks));
+            if checks.iter().any(|c| c.fix.is_some()) {
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
         }
         Some("run") => run(),
         // Internal: asks macOS in a fresh process (see `wait_for_accessibility`).

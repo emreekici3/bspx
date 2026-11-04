@@ -116,6 +116,12 @@ pub fn held(modifier: Modifier) -> bool {
     unsafe { CGEventSourceFlagsState(COMBINED_SESSION_STATE) & flag(modifier) != 0 }
 }
 
+/// Whether any modifier is held right now.
+pub fn any_held() -> bool {
+    use Modifier::{Alt, Cmd, Ctrl, Fn, Shift};
+    [Alt, Cmd, Ctrl, Fn, Shift].into_iter().any(held)
+}
+
 pub fn gesture() -> Option<MouseButton> {
     let latched = LATCHED.swap(0, Relaxed);
     button(ACTIVE.load(Relaxed)).or(button(latched))

@@ -59,6 +59,8 @@ pub struct Manager<B: Backend> {
     resize_anchor: Option<ResizeRun>,
     /// The drop highlight on screen, if any.
     shown_overlay: Option<Overlay>,
+    /// The Space shown before the current one, for `space recent`.
+    previous_space: Option<u64>,
     /// What the system last said had focus; see `sync_focus`.
     reported_focus: Option<WinId>,
     /// The window focused before the system's focus last moved, and when
@@ -191,6 +193,7 @@ impl<B: Backend> Manager<B> {
             min_sizes: MinSizes::new(),
             resize_anchor: None,
             shown_overlay: None,
+            previous_space: None,
             reported_focus: None,
             focus_moved: None,
             zoomed: None,
@@ -366,6 +369,7 @@ impl<B: Backend> Manager<B> {
                 self.make_current(space);
             } else {
                 self.switch_space(space);
+                self.land_on_space(focused_now);
             }
             dirty = true;
         }
@@ -667,11 +671,34 @@ impl<B: Backend> Manager<B> {
     /// The Space number and id `space` (a number or a label) stands for, on
     /// the current display: Spaces are numbered from 1 on each display.
     fn resolve_space(&mut self, space: &str) -> Result<(usize, u64), String> {
+        let current = self.current_space();
+        if self.config.space_number(space).is_none() {
+            let spaces = self.backend.display_spaces(current);
+            let here = spaces.iter().position(|s| *s == current);
+            let at = match (space, here) {
+                ("next", Some(i)) => Some((i + 1) % spaces.len()),
+                ("prev", Some(i)) => Some((i + spaces.len() - 1) % spaces.len()),
+                ("recent", _) => {
+                    let last = self
+                        .previous_space
+                        .ok_or("no Space was shown before this one")?;
+                    Some(
+                        spaces
+                            .iter()
+                            .position(|s| *s == last)
+                            .ok_or("the last Space is not on this display")?,
+                    )
+                }
+                _ => None,
+            };
+            if let Some(i) = at {
+                return Ok((i + 1, spaces[i]));
+            }
+        }
         let n = self
             .config
             .space_number(space)
             .ok_or_else(|| format!("no Space is labelled '{space}'"))?;
-        let current = self.current_space();
         let id = *self
             .backend
             .display_spaces(current)
@@ -732,7 +759,12 @@ impl<B: Backend> Manager<B> {
         if sid == self.active_space {
             return false;
         }
-        if self.backend.move_to_space(id, sid) {
+        let moved = if self.config.rule_carry {
+            self.backend.move_to_space(id, sid)
+        } else {
+            self.backend.place_on_space(id, sid)
+        };
+        if moved {
             info!("window {id} of {app} sent to Space {n}");
             true
         } else {
@@ -862,9 +894,22 @@ impl<B: Backend> Manager<B> {
         refresh
     }
 
+    /// A Space just came on screen: its last window gets the keyboard back,
+    /// if the focus was left behind on a Space no longer shown.
+    fn land_on_space(&mut self, focused_now: Option<WinId>) {
+        let left_behind = focused_now.is_none_or(|f| {
+            self.tiled_space_of(f)
+                .is_some_and(|s| s != self.active_space)
+        });
+        if let Some(win) = self.focused.filter(|_| left_behind) {
+            self.backend.focus(win);
+        }
+    }
+
     /// Puts the current layout away and brings out the one of `space`.
     fn switch_space(&mut self, space: u64) {
         debug!("Space {} -> {space}", self.active_space);
+        self.previous_space = Some(self.active_space);
         for id in self.tree.windows() {
             self.mover.halt(id);
         }
@@ -2197,6 +2242,8 @@ impl<B: Backend> Manager<B> {
                 self.relayout();
             }
             Command::Query => return Ok(self.describe()),
+            Command::QueryJson => return Ok(self.describe_json()),
+            Command::DaemonVersion => return Ok(format!("{}\n", env!("CARGO_PKG_VERSION"))),
             Command::Bind(None) => {
                 let mut out = String::new();
                 for line in &self.config.hotkeys {
@@ -2319,6 +2366,42 @@ impl<B: Backend> Manager<B> {
         Ok(String::new())
     }
 
+    /// The windows as a JSON array, in the order of [`Self::describe`].
+    pub fn describe_json(&self) -> String {
+        let mut ids: Vec<WinId> = self.frames.keys().copied().collect();
+        ids.sort_unstable();
+        let windows: Vec<String> = ids
+            .into_iter()
+            .map(|id| {
+                let f = self.mover.heading(id).unwrap_or(self.frames[&id]);
+                let app = self.apps.get(&id).map_or("?", String::as_str);
+                format!(
+                    "{{\"id\":{id},\"app\":{},\"x\":{},\"y\":{},\"w\":{},\"h\":{},\
+                     \"state\":\"{}\",\"focused\":{}}}",
+                    json_string(app),
+                    f.x,
+                    f.y,
+                    f.w,
+                    f.h,
+                    self.window_state(id),
+                    self.focused == Some(id)
+                )
+            })
+            .collect();
+        format!("[{}]\n", windows.join(","))
+    }
+
+    /// `zoomed`, `tiled` or `floating`.
+    fn window_state(&self, id: WinId) -> &'static str {
+        if self.zoomed.is_some_and(|(w, _)| w == id) {
+            "zoomed"
+        } else if self.is_tiled_anywhere(id) {
+            "tiled"
+        } else {
+            "floating"
+        }
+    }
+
     /// One line per window: `id app x,y wxh [tiled|floating] [focused]`.
     pub fn describe(&self) -> String {
         let mut ids: Vec<WinId> = self.frames.keys().copied().collect();
@@ -2326,13 +2409,7 @@ impl<B: Backend> Manager<B> {
         let mut out = String::new();
         for id in ids {
             let f = self.mover.heading(id).unwrap_or(self.frames[&id]);
-            let state = if self.zoomed.is_some_and(|(w, _)| w == id) {
-                "zoomed"
-            } else if self.is_tiled_anywhere(id) {
-                "tiled"
-            } else {
-                "floating"
-            };
+            let state = self.window_state(id);
             let focus = if self.focused == Some(id) {
                 " focused"
             } else {
@@ -2358,6 +2435,22 @@ impl<B: Backend> Manager<B> {
         }
         out
     }
+}
+
+/// `text` as a JSON string.
+fn json_string(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// The zoomed window of a layout and the area it covers.
@@ -2440,6 +2533,9 @@ pub(crate) mod tests {
         pub displays: Vec<Display>,
         /// The Spaces of each display, in order; empty means `spaces`.
         pub display_spaces: Vec<Vec<u64>>,
+        /// Windows only reach another Space with the user along, by the
+        /// title bar, as on recent macOS.
+        pub carries: bool,
     }
 
     impl MockBackend {
@@ -2571,7 +2667,13 @@ pub(crate) mod tests {
                 return false;
             }
             self.space_of.insert(id, space);
+            if self.carries {
+                self.active = space;
+            }
             true
+        }
+        fn place_on_space(&mut self, id: WinId, space: u64) -> bool {
+            !self.carries && self.move_to_space(id, space)
         }
         fn warp_cursor(&mut self, x: f32, y: f32) {
             self.cursor = (x, y);
@@ -5151,5 +5253,149 @@ pub(crate) mod tests {
         let (one, two) = (m.backend().frame(1), m.backend().frame(2));
         assert_eq!(one.w, 500, "window 1 at its minimum");
         assert_eq!(two.x, one.max_x() + 10, "window 2 right against it");
+    }
+
+    fn run(m: &mut Manager<MockBackend>, line: &str) -> Result<String, String> {
+        m.execute(&Command::parse(line).unwrap())
+    }
+
+    #[test]
+    fn next_and_prev_go_round_the_spaces() {
+        let mut m = three_spaces();
+        run(&mut m, "space next").unwrap();
+        m.refresh();
+        assert_eq!(m.active_space(), 20);
+        run(&mut m, "space next").unwrap();
+        m.refresh();
+        assert_eq!(m.active_space(), 30);
+        run(&mut m, "space next").unwrap();
+        m.refresh();
+        assert_eq!(m.active_space(), 10, "round to the first");
+        run(&mut m, "space prev").unwrap();
+        m.refresh();
+        assert_eq!(m.active_space(), 30, "round to the last");
+    }
+
+    #[test]
+    fn recent_goes_back_and_forth() {
+        let mut m = three_spaces();
+        m.refresh();
+        assert!(run(&mut m, "space recent").is_err());
+        run(&mut m, "space 3").unwrap();
+        m.refresh();
+        run(&mut m, "space recent").unwrap();
+        m.refresh();
+        assert_eq!(m.active_space(), 10);
+        run(&mut m, "space recent").unwrap();
+        m.refresh();
+        assert_eq!(m.active_space(), 30);
+    }
+
+    #[test]
+    fn a_label_named_next_wins_over_the_word() {
+        let mut m = three_spaces();
+        run(&mut m, "label 3 next").unwrap();
+        run(&mut m, "space next").unwrap();
+        m.refresh();
+        assert_eq!(m.active_space(), 30);
+    }
+
+    #[test]
+    fn send_next_moves_the_window_one_space_on() {
+        let mut m = three_spaces();
+        m.backend.open(1, "Terminal");
+        m.refresh();
+        run(&mut m, "send next").unwrap();
+        assert_eq!(m.backend().space_of[&1], 20);
+    }
+
+    #[test]
+    fn a_carry_ends_on_the_new_space() {
+        let mut m = three_spaces();
+        m.backend.carries = true;
+        m.backend.open(1, "Terminal");
+        m.refresh();
+        run(&mut m, "send 2").unwrap();
+        assert_eq!(m.backend().active, 20);
+        assert_eq!(m.backend().focused, Some(1));
+    }
+
+    #[test]
+    fn landing_on_a_space_gives_its_last_window_the_keyboard() {
+        let mut m = three_spaces();
+        m.backend.open(1, "Terminal");
+        m.refresh();
+        m.backend.active = 20;
+        m.refresh();
+        m.backend.open(2, "Notes");
+        m.refresh();
+        // Back to Space 1, with macOS leaving the focus on Notes.
+        m.backend.active = 10;
+        m.backend.focus_calls.clear();
+        m.refresh();
+        assert_eq!(m.backend().focus_calls, [1]);
+    }
+
+    #[test]
+    fn landing_leaves_a_window_that_just_opened_alone() {
+        let mut m = three_spaces();
+        m.backend.open(1, "Terminal");
+        m.refresh();
+        m.backend.active = 20;
+        m.refresh();
+        m.backend.open(2, "Notes");
+        m.refresh();
+        m.backend.active = 10;
+        m.backend.open(3, "Mail"); // focused, and not tiled yet
+        m.backend.focus_calls.clear();
+        m.refresh();
+        assert!(m.backend().focus_calls.is_empty());
+    }
+
+    #[test]
+    fn a_rule_does_not_carry_with_rule_carry_off() {
+        let mut m = three_spaces();
+        m.backend.carries = true;
+        run(&mut m, "rule space 2 Safari").unwrap();
+        run(&mut m, "config rule_carry off").unwrap();
+        m.refresh();
+        m.backend.open(1, "Safari");
+        m.refresh();
+        assert_eq!(m.backend().active, 10, "the user stays");
+        assert_eq!(m.backend().space_of[&1], 10);
+        assert_eq!(m.tree().windows(), vec![1], "tiled here instead");
+    }
+
+    #[test]
+    fn a_rule_carries_by_default() {
+        let mut m = three_spaces();
+        m.backend.carries = true;
+        run(&mut m, "rule space 2 Safari").unwrap();
+        m.refresh();
+        m.backend.open(1, "Safari");
+        m.refresh();
+        assert_eq!(m.backend().space_of[&1], 20);
+    }
+
+    #[test]
+    fn query_json_lists_the_windows() {
+        let mut m = manager(0.0);
+        assert_eq!(run(&mut m, "query --json").unwrap(), "[]\n");
+        m.backend.open(1, "Term\"inal");
+        m.refresh();
+        assert_eq!(
+            run(&mut m, "query --json").unwrap(),
+            "[{\"id\":1,\"app\":\"Term\\\"inal\",\"x\":0,\"y\":25,\"w\":1000,\"h\":600,\
+             \"state\":\"tiled\",\"focused\":true}]\n"
+        );
+    }
+
+    #[test]
+    fn the_daemon_says_its_version() {
+        let mut m = manager(0.0);
+        assert_eq!(
+            run(&mut m, "daemon-version").unwrap().trim(),
+            env!("CARGO_PKG_VERSION")
+        );
     }
 }

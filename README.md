@@ -16,6 +16,8 @@ cberry start
 
 Then enable `cberry` under *System Settings → Privacy & Security → Accessibility*.
 
+If something is off, `cberry doctor` says what.
+
 To update, run `brew upgrade cranberry` and `cberry restart`. If windows stop moving, remove `cberry` from the Accessibility list, add it again and run `cberry restart`.
 
 ### Manual install
