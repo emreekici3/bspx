@@ -1,6 +1,6 @@
 [package]
 name = "cranberry"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2024"
 description = "A BSP tiling window manager for macOS with smooth animations."
 license = "MIT"
