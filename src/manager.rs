@@ -1404,7 +1404,9 @@ impl<B: Backend> Manager<B> {
             above: id,
             color: self.config.border_color,
             width: self.config.border_width,
-            radius: self.config.border_radius,
+            radius: self
+                .config
+                .border_radius_for(self.apps.get(&id).map_or("", String::as_str)),
         })
     }
 
@@ -2361,6 +2363,10 @@ impl<B: Backend> Manager<B> {
             }
             Command::GridRule { grid, ref app } => {
                 self.config.set_grid_rule(app, grid);
+                return Ok(String::new());
+            }
+            Command::BorderRadiusRule { radius, ref app } => {
+                self.config.set_border_radius_rule(app, radius);
                 return Ok(String::new());
             }
             Command::Send(ref space) => {
@@ -5557,5 +5563,18 @@ pub(crate) mod tests {
         m.backend.mouse = false;
         m.pump();
         assert!(!m.is_held());
+    }
+
+    #[test]
+    fn an_app_can_have_corners_of_its_own() {
+        let mut m = bordered();
+        assert_eq!(m.backend().border.unwrap().radius, 12);
+        run(&mut m, "rule border_radius 0 Notes").unwrap();
+        m.pump();
+        assert_eq!(m.backend().border.unwrap().radius, 0);
+        m.backend.focused = Some(1);
+        m.refresh();
+        m.pump();
+        assert_eq!(m.backend().border.unwrap().radius, 12);
     }
 }

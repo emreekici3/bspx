@@ -68,6 +68,8 @@ pub enum Command {
     /// Float the windows of an app at a grid cell when they open:
     /// `[rows, cols, x, y, w, h]`, as in yabai's `grid=`.
     GridRule { grid: [u32; 6], app: String },
+    /// How round the ring around an app's windows is.
+    BorderRadiusRule { radius: i32, app: String },
     /// Name a Space (numbered from 1, as in Mission Control); `None` lists
     /// the Spaces and their names.
     Label(Option<(usize, String)>),
@@ -121,6 +123,9 @@ settings (put these in ~/.config/cranberry/cberryrc):
   rule grid <r:c:x:y:w:h> <app>
                              open an app's windows floating at a grid cell,
                              e.g. rule grid 4:4:3:0:1:1 Calculator (top right)
+  rule border_radius <radius> <app>
+                             how round the border around an app's windows is,
+                             e.g. rule border_radius 0 kitty
   label [<n> <name>]         name Space n, e.g. label 2 web; alone, list Spaces
   bind ['<hotkey>']          a keyboard shortcut, e.g. bind 'alt - h : cberry focus left';
                              alone, list them
@@ -268,6 +273,21 @@ impl Command {
                 check_app_pattern(&app)?;
                 return Ok(Command::GridRule { grid, app });
             }
+            Some("rule") if words.get(1) == Some(&"border_radius") => {
+                const USE: &str = "usage: rule border_radius <radius> <app>";
+                let radius = words.get(2).ok_or(USE)?;
+                let radius = radius
+                    .parse()
+                    .ok()
+                    .filter(|r| (0..=40).contains(r))
+                    .ok_or("rule border_radius: must be between 0 and 40")?;
+                if words.len() < 4 {
+                    return Err(USE.into());
+                }
+                let app = words[3..].join(" ");
+                check_app_pattern(&app)?;
+                return Ok(Command::BorderRadiusRule { radius, app });
+            }
             Some("rule") if words.get(1) == Some(&"space") => {
                 let space = words
                     .get(2)
@@ -283,11 +303,15 @@ impl Command {
                 });
             }
             Some("rule") => {
-                let float = match words.get(1).copied() {
-                    Some("float") => true,
-                    Some("tile") => false,
-                    _ => return Err("rule: expected 'float', 'tile', 'space' or 'grid'".into()),
-                };
+                let float =
+                    match words.get(1).copied() {
+                        Some("float") => true,
+                        Some("tile") => false,
+                        _ => return Err(
+                            "rule: expected 'float', 'tile', 'space', 'grid' or 'border_radius'"
+                                .into(),
+                        ),
+                    };
                 if words.len() < 3 {
                     return Err("rule: missing app name".into());
                 }
@@ -534,5 +558,20 @@ mod tests {
         assert_eq!(Command::parse("query"), Ok(Command::Query));
         assert_eq!(Command::parse("query --json"), Ok(Command::QueryJson));
         assert!(Command::parse("query --xml").is_err());
+    }
+
+    #[test]
+    fn border_radius_rules() {
+        assert_eq!(
+            Command::parse("rule border_radius 0 Google Chrome"),
+            Ok(Command::BorderRadiusRule {
+                radius: 0,
+                app: "Google Chrome".into(),
+            })
+        );
+        assert!(Command::parse("rule border_radius").is_err());
+        assert!(Command::parse("rule border_radius 0").is_err());
+        assert!(Command::parse("rule border_radius 99 kitty").is_err());
+        assert!(Command::parse("rule border_radius round kitty").is_err());
     }
 }

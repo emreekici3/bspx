@@ -45,6 +45,8 @@ pub struct Config {
     pub border_width: i32,
     /// The roundness of windows' corners, for the ring to follow, in points.
     pub border_radius: i32,
+    /// Apps whose windows have corners of their own: (app, radius).
+    pub border_radius_rules: Vec<(String, i32)>,
     /// Held with a click anywhere on a window, moves or resizes it.
     pub mouse_modifier: Option<Modifier>,
     /// Held as well while moving a tiled window with the modifier, dropping
@@ -120,6 +122,7 @@ impl Default for Config {
             border_color: [0.541, 0.663, 0.973, 1.0],
             border_width: 2,
             border_radius: 12,
+            border_radius_rules: Vec::new(),
             mouse_modifier: Some(Modifier::Alt),
             mouse_insert_modifier: None,
             mouse_action1: MouseAction::Move,
@@ -547,6 +550,21 @@ impl Config {
                 .find(|(_, l)| l.as_str() == space)
                 .map(|(n, _)| *n)
         })
+    }
+
+    /// `cberry rule border_radius <radius> <app>`.
+    pub fn set_border_radius_rule(&mut self, app: &str, radius: i32) {
+        self.border_radius_rules.retain(|(a, _)| !same_rule(a, app));
+        self.border_radius_rules.push((app.to_string(), radius));
+    }
+
+    /// The roundness of the ring around a window of `app`.
+    pub fn border_radius_for(&self, app: &str) -> i32 {
+        self.border_radius_rules
+            .iter()
+            .rev()
+            .find(|(a, _)| app_matches(a, app))
+            .map_or(self.border_radius, |(_, radius)| *radius)
     }
 
     /// `cberry rule float <app>` / `cberry rule tile <app>`.

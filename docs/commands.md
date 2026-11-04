@@ -46,6 +46,7 @@
 | `cberry rule float\|tile "<app>"` | Never tile an app's windows, or tile them again |
 | `cberry rule space <space> "<app>"` | Send an app's new windows to a Space |
 | `cberry rule grid <rows:cols:x:y:w:h> "<app>"` | Open an app's new windows floating at a grid cell |
+| `cberry rule border_radius <radius> "<app>"` | Set how round the border around an app's windows is |
 
 ### Service
 

@@ -66,6 +66,7 @@ cberry rule float "Archive Utility"
 # cberry config border_color 8aa9f8
 # cberry config border_width 2
 # cberry config border_radius 12
+# cberry rule border_radius 0 "kitty"     # an app with square corners
 
 # Keyboard shortcuts. `cberry ...` commands run inside
 # cberry; anything else runs in your shell. `cberry bind` lists them.

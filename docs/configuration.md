@@ -31,7 +31,7 @@ cberry reload
 | `border` | Draw a ring around the focused window, `on` / `off` | `off` |
 | `border_color` | The ring's colour, `RRGGBB` or `RRGGBBAA` | `8aa9f8ff` |
 | `border_width` | The ring's width in points, `1` to `20` | `2` |
-| `border_radius` | How round your windows' corners are, `0` to `40` | `12` |
+| `border_radius` | How round your windows' corners are, `0` to `40`; `cberry rule border_radius 0 "kitty"` sets it for one app | `12` |
 | `mouse_modifier` | Key to hold for mouse moves and resizes: `alt`, `cmd`, `ctrl`, `shift`, `fn` or `off` | `alt` |
 | `mouse_insert_modifier` | Also held while moving a window, dropping it splits the window under it instead of swapping: `alt`, `cmd`, `ctrl`, `shift`, `fn` or `off` | `off` |
 | `mouse_action1` | Left-drag with the modifier: `move` or `resize` | `move` |
