@@ -10,7 +10,7 @@
 | `cberry swap <dir>` | Swap with the neighbouring window |
 | `cberry warp <dir>` | Move into the neighbouring window's place, splitting it |
 | `cberry resize <dir> [amount]` | Move a border of the window, tiled or floating |
-| `cberry zoom [fullscreen\|parent]` | Grow the window over the others, or put it back |
+| `cberry zoom [fullscreen\|parent]` | Grow the window over the others, or put it back; a floating window covers the screen |
 
 ### Layout
 

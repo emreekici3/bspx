@@ -40,6 +40,8 @@ pub struct Manager<B: Backend> {
     apps: HashMap<WinId, String>,
     /// Windows the user took out of the layout.
     floating: HashSet<WinId>,
+    /// Where each floating window `cberry zoom` grew was before.
+    float_zooms: HashMap<WinId, Rect>,
     /// Windows reported closed that may still show up in the window list
     /// during their close animation; they must not be tiled again. Some
     /// apps (Electron ones like Claude or Slack) only hide a window closed
@@ -198,6 +200,7 @@ impl<B: Backend> Manager<B> {
             frames: HashMap::new(),
             apps: HashMap::new(),
             floating: HashSet::new(),
+            float_zooms: HashMap::new(),
             closed: HashSet::new(),
             focused: None,
             min_sizes: MinSizes::new(),
@@ -500,6 +503,7 @@ impl<B: Backend> Manager<B> {
         }
 
         self.floating.retain(|w| alive.contains(w));
+        self.float_zooms.retain(|w, _| alive.contains(w));
         if !self.synced {
             self.synced = true;
             self.seen.extend(alive.iter().copied());
@@ -1575,6 +1579,7 @@ impl<B: Backend> Manager<B> {
                 if frame != prev {
                     self.backend.update_frame(grab.win, frame, prev);
                     self.frames.insert(grab.win, frame);
+                    self.float_zooms.remove(&grab.win);
                 }
                 let insert = self
                     .config
@@ -1634,6 +1639,7 @@ impl<B: Backend> Manager<B> {
                     if frame != prev {
                         self.backend.update_frame(grab.win, frame, prev);
                         self.frames.insert(grab.win, frame);
+                        self.float_zooms.remove(&grab.win);
                     }
                 }
             }
@@ -1941,6 +1947,7 @@ impl<B: Backend> Manager<B> {
         if frame == now {
             return Err("the border is as far as it goes".into());
         }
+        self.float_zooms.remove(&win);
         self.glide(win, frame);
         Ok(())
     }
@@ -2216,6 +2223,25 @@ impl<B: Backend> Manager<B> {
             Command::Balance => self.tree.equalize(self.config.split_ratio),
             Command::BalanceArea => self.tree.balance(),
             Command::Zoom(zoom) => {
+                // A floating window has no split: it covers the screen, and
+                // goes back to where it was.
+                let float = self
+                    .backend
+                    .focused_window()
+                    .filter(|w| self.movable.contains(w) && !self.is_tiled_anywhere(*w));
+                if let Some(win) = float {
+                    match self.float_zooms.remove(&win) {
+                        Some(before) => self.glide(win, before),
+                        None => {
+                            let now = self
+                                .heading_of(win)
+                                .ok_or("the focused window is not managed")?;
+                            self.float_zooms.insert(win, now);
+                            self.glide(win, self.inner_area_around(now));
+                        }
+                    }
+                    return Ok(String::new());
+                }
                 let win = focused()?;
                 if self.zoomed == Some((win, zoom)) {
                     self.zoomed = None;
@@ -2289,6 +2315,7 @@ impl<B: Backend> Manager<B> {
                     self.focused = self.tree.windows().last().copied();
                 }
                 self.floating.insert(win);
+                self.float_zooms.remove(&win);
                 self.glide(win, frame);
                 info!("window {win} floats at grid {grid:?}: {frame:?}");
             }
@@ -5642,5 +5669,33 @@ pub(crate) mod tests {
         run(&mut m, "float 6:6:1:1:4:4").unwrap();
         assert_eq!(m.tree().windows(), vec![1, 2]);
         assert_eq!(m.backend().frame(2), tiled);
+    }
+
+    #[test]
+    fn zoom_covers_the_screen_for_a_floating_window_and_back() {
+        let mut m = manager(0.0);
+        m.backend.open(1, "Calculator");
+        m.refresh();
+        m.backend.focused = Some(1);
+        let before = m.backend().frame(1);
+        run(&mut m, "zoom").unwrap();
+        assert_eq!(m.backend().frame(1), Rect::new(0, 25, 1000, 600));
+        run(&mut m, "zoom").unwrap();
+        assert_eq!(m.backend().frame(1), before);
+    }
+
+    #[test]
+    fn a_floating_window_moved_after_zoom_zooms_afresh() {
+        let mut m = manager(0.0);
+        m.backend.open(1, "Calculator");
+        m.refresh();
+        m.backend.focused = Some(1);
+        run(&mut m, "zoom").unwrap();
+        run(&mut m, "grid 2:2:0:0:1:1").unwrap();
+        let cell = m.backend().frame(1);
+        run(&mut m, "zoom").unwrap();
+        assert_eq!(m.backend().frame(1), Rect::new(0, 25, 1000, 600));
+        run(&mut m, "zoom").unwrap();
+        assert_eq!(m.backend().frame(1), cell);
     }
 }
