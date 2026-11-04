@@ -1642,7 +1642,7 @@ impl Backend for MacBackend {
             }
         }
         if let Some(w) = &mut self.border {
-            w.show_ring(b.rect, b.above, b.color, b.width, b.radius);
+            w.show_ring(b.rect, b.color, b.width, b.radius);
         }
     }
 

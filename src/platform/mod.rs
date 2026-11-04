@@ -257,8 +257,8 @@ pub enum WindowEvent {
 pub struct Border {
     /// The window's frame; the ring goes outside it.
     pub rect: Rect,
-    /// The window the ring sits on (it is stacked just above it).
-    pub above: WinId,
+    /// The window it goes around.
+    pub window: WinId,
     /// RGBA, 0..=1.
     pub color: [f32; 4],
     pub width: i32,

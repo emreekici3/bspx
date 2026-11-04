@@ -39,6 +39,10 @@ const COLLECTION_BEHAVIOR: usize = (1 << 0) | (1 << 4) | (1 << 6) | (1 << 8);
 /// ring stays on the Space of its window, so a swipe takes it away with the
 /// window, and Mission Control hides it.
 const RING_BEHAVIOR: usize = (1 << 1) | (1 << 3) | (1 << 6) | (1 << 8);
+/// `NSFloatingWindowLevel`: above every normal window, so that no click can
+/// raise a window, or its shadow, over the ring. It is the focused window's,
+/// and that one is in front of the others anyway.
+const NS_FLOATING_WINDOW_LEVEL: isize = 3;
 const CORNER_RADIUS: f64 = 10.0;
 const BORDER_WIDTH: f64 = 2.0;
 
@@ -60,7 +64,9 @@ impl OverlayWindow {
 
     /// The ring around the focused window.
     pub fn ring() -> Option<Self> {
-        Self::with_behavior(RING_BEHAVIOR)
+        let ring = Self::with_behavior(RING_BEHAVIOR)?;
+        unsafe { msg!(ring.window, "setLevel:", NS_FLOATING_WINDOW_LEVEL => isize) };
+        Some(ring)
     }
 
     fn with_behavior(behavior: usize) -> Option<Self> {
@@ -134,17 +140,10 @@ impl OverlayWindow {
         }
     }
 
-    /// Shows a ring just outside `rect` (top-left global coordinates), just
-    /// above window `above`. `radius` is the roundness of the window's own
-    /// corners, so that the ring follows them.
-    pub fn show_ring(
-        &mut self,
-        rect: Rect,
-        above: WinId,
-        color: [f32; 4],
-        width: i32,
-        radius: i32,
-    ) {
+    /// Shows a ring just outside `rect` (top-left global coordinates).
+    /// `radius` is the roundness of the window's own corners, so that the
+    /// ring follows them.
+    pub fn show_ring(&mut self, rect: Rect, color: [f32; 4], width: i32, radius: i32) {
         let outer = Rect::new(
             rect.x - width,
             rect.y - width,
@@ -167,7 +166,7 @@ impl OverlayWindow {
                 self.ring = Some(ring);
             }
             msg!(catx, "commit");
-            self.place(outer, above);
+            self.place(outer, 0);
         }
     }
 
