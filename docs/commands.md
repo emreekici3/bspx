@@ -58,5 +58,6 @@
 | `cberry config <key> [value]` | Show or change a setting |
 | `cberry bind ['<hotkey>']` | Add a keyboard shortcut; alone, list them |
 | `cberry query` | List windows with their app names |
+| `cberry version` | Print the version |
 
 [Back to the README](../README.md)

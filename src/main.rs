@@ -11,7 +11,8 @@ fn print_help() {
     println!("  cberry stop               stop the service");
     println!("  cberry restart            restart the service");
     println!("  cberry uninstall          remove the service");
-    println!("  cberry run                run in this terminal instead (for debugging)\n");
+    println!("  cberry run                run in this terminal instead (for debugging)");
+    println!("  cberry version            print the version\n");
     println!("{USAGE}");
 }
 
@@ -33,6 +34,10 @@ fn main() -> ExitCode {
     match args.first().map(String::as_str) {
         None | Some("-h" | "--help" | "help") => {
             print_help();
+            ExitCode::SUCCESS
+        }
+        Some("-v" | "--version" | "version") => {
+            println!("cberry {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
         Some("run") => run(),
