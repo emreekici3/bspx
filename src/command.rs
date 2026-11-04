@@ -49,6 +49,8 @@ pub enum Command {
     Zoom(Zoom),
     /// Take the focused window out of the layout, or put it back.
     ToggleFloat,
+    /// Float the focused window at a grid cell, or tile it if it floats.
+    ToggleFloatAt([u32; 6]),
     /// Bring every floating window on the current Space to the front.
     RaiseFloating,
     /// Float the focused window and put it at a grid cell:
@@ -102,7 +104,8 @@ commands:
   rotate | flip | toggle-split
   balance [area]                           undo resizes; area: give all windows the same area
   zoom [fullscreen|parent]                 toggle zoom for the focused window
-  float                                    toggle tiling for the focused window
+  float [r:c:x:y:w:h]                      toggle tiling for the focused window; with a
+                                           grid cell, it floats there
   raise-floating                           bring floating windows to the front
   grid <r:c:x:y:w:h>                       float the focused window at a grid cell,
                                            e.g. grid 6:6:1:1:4:4 (centred)
@@ -176,7 +179,10 @@ impl Command {
                 Some("parent") => Zoom::Parent,
                 Some(other) => return Err(format!("zoom: unknown mode '{other}'")),
             }),
-            Some("float") => no_args(Command::ToggleFloat)?,
+            Some("float") => match words.get(1) {
+                None => Command::ToggleFloat,
+                Some(grid) => Command::ToggleFloatAt(parse_grid(grid)?),
+            },
             Some("raise-floating") => no_args(Command::RaiseFloating)?,
             Some("grid") => Command::Grid(parse_grid(
                 words.get(1).ok_or("grid: missing rows:cols:x:y:w:h")?,
@@ -329,6 +335,7 @@ impl Command {
             | Command::BalanceArea
             | Command::Zoom(_)
             | Command::Grid(_)
+            | Command::ToggleFloatAt(_)
             | Command::QueryJson
             | Command::Send(_)
             | Command::SendDisplay(_)
@@ -573,5 +580,16 @@ mod tests {
         assert!(Command::parse("rule border_radius 0").is_err());
         assert!(Command::parse("rule border_radius 99 kitty").is_err());
         assert!(Command::parse("rule border_radius round kitty").is_err());
+    }
+
+    #[test]
+    fn float_can_name_a_grid_cell() {
+        assert_eq!(Command::parse("float"), Ok(Command::ToggleFloat));
+        assert_eq!(
+            Command::parse("float 6:6:1:1:4:4"),
+            Ok(Command::ToggleFloatAt([6, 6, 1, 1, 4, 4]))
+        );
+        assert!(Command::parse("float nowhere").is_err());
+        assert!(Command::parse("float 6:6:1:1:4:4 more").is_err());
     }
 }

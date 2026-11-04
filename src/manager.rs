@@ -2256,6 +2256,18 @@ impl<B: Backend> Manager<B> {
                     info!("window {win} tiled");
                 }
             }
+            Command::ToggleFloatAt(grid) => {
+                let win = self
+                    .backend
+                    .focused_window()
+                    .or(self.focused)
+                    .ok_or("no window is focused")?;
+                return if self.is_tiled_anywhere(win) {
+                    self.execute(&Command::Grid(grid))
+                } else {
+                    self.execute(&Command::ToggleFloat)
+                };
+            }
             Command::Grid(grid) => {
                 let win = self
                     .backend
@@ -5612,5 +5624,23 @@ pub(crate) mod tests {
         m.refresh();
         m.pump();
         assert_eq!(m.backend().border.unwrap().radius, 12);
+    }
+
+    #[test]
+    fn float_at_a_cell_goes_there_and_back() {
+        let mut m = manager(0.0);
+        m.backend.open(1, "Terminal");
+        m.backend.open(2, "Notes");
+        m.refresh();
+        let tiled = m.backend().frame(2);
+        m.backend.focused = Some(2);
+        run(&mut m, "float 6:6:1:1:4:4").unwrap();
+        assert_eq!(m.tree().windows(), vec![1]);
+        assert_eq!(m.backend().frame(2), Rect::new(167, 125, 666, 400));
+        m.refresh();
+        m.backend.focused = Some(2);
+        run(&mut m, "float 6:6:1:1:4:4").unwrap();
+        assert_eq!(m.tree().windows(), vec![1, 2]);
+        assert_eq!(m.backend().frame(2), tiled);
     }
 }

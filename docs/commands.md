@@ -25,7 +25,7 @@
 
 | Command | What it does |
 |---|---|
-| `cberry float` | Float or tile the focused window |
+| `cberry float [rows:cols:x:y:w:h]` | Float or tile the focused window; with a grid cell, it floats there |
 | `cberry raise-floating` | Bring floating windows to the front |
 | `cberry grid <rows:cols:x:y:w:h>` | Float the window at a grid cell; `6:6:1:1:4:4` centres it |
 
