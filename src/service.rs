@@ -138,10 +138,30 @@ fn is_loaded() -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
+/// The path of `exe` that outlives an upgrade. Homebrew keeps each version in
+/// a folder of its own and removes the old one, but `opt` always points at the
+/// current version: `<prefix>/Cellar/<name>/<version>/bin/cberry` is
+/// `<prefix>/opt/<name>/bin/cberry`.
+fn stable_path(exe: &Path) -> PathBuf {
+    let parts: Vec<_> = exe.components().collect();
+    let Some(cellar) = parts.iter().position(|c| c.as_os_str() == "Cellar") else {
+        return exe.to_path_buf();
+    };
+    if parts.len() < cellar + 4 {
+        return exe.to_path_buf();
+    }
+    let mut path: PathBuf = parts[..cellar].iter().collect();
+    path.push("opt");
+    path.push(parts[cellar + 1]);
+    path.extend(&parts[cellar + 3..]);
+    path
+}
+
 pub fn install() -> Result<String, String> {
     let exe = std::env::current_exe()
         .and_then(|p| p.canonicalize())
         .map_err(|e| format!("cannot find the cberry binary: {e}"))?;
+    let exe = stable_path(&exe);
     let plist_file = plist_path()?;
     if let Some(dir) = plist_file.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -231,6 +251,25 @@ mod tests {
             Path::new("e"),
         );
         assert!(p.contains("/a&amp;b/&lt;cberry&gt;"));
+    }
+
+    #[test]
+    fn a_homebrew_binary_is_run_from_the_path_that_outlives_upgrades() {
+        assert_eq!(
+            stable_path(Path::new("/opt/homebrew/Cellar/cranberry/0.2.2/bin/cberry")),
+            Path::new("/opt/homebrew/opt/cranberry/bin/cberry")
+        );
+        assert_eq!(
+            stable_path(Path::new("/usr/local/Cellar/cranberry/0.2.2_1/bin/cberry")),
+            Path::new("/usr/local/opt/cranberry/bin/cberry")
+        );
+    }
+
+    #[test]
+    fn any_other_binary_stays_where_it_is() {
+        for path in ["/Users/me/bin/cberry", "/usr/local/bin/cberry"] {
+            assert_eq!(stable_path(Path::new(path)), Path::new(path));
+        }
     }
 
     #[test]
