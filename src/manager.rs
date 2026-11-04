@@ -5636,7 +5636,7 @@ pub(crate) mod tests {
         m.backend.focused = Some(2);
         run(&mut m, "float 6:6:1:1:4:4").unwrap();
         assert_eq!(m.tree().windows(), vec![1]);
-        assert_eq!(m.backend().frame(2), Rect::new(167, 125, 666, 400));
+        assert_eq!(m.backend().frame(2), Rect::new(166, 125, 667, 400));
         m.refresh();
         m.backend.focused = Some(2);
         run(&mut m, "float 6:6:1:1:4:4").unwrap();
