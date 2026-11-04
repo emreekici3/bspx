@@ -4,6 +4,7 @@
 
 use std::ffi::c_void;
 use std::ptr;
+use std::sync::Once;
 
 use super::ffi::*;
 use crate::bsp::WinId;
@@ -34,6 +35,10 @@ const NS_WINDOW_ABOVE: isize = 1;
 const NS_WINDOW_ANIMATION_BEHAVIOR_NONE: isize = 2;
 /// canJoinAllSpaces | stationary | ignoresCycle | fullScreenAuxiliary
 const COLLECTION_BEHAVIOR: usize = (1 << 0) | (1 << 4) | (1 << 6) | (1 << 8);
+/// moveToActiveSpace | transient | ignoresCycle | fullScreenAuxiliary: the
+/// ring stays on the Space of its window, so a swipe takes it away with the
+/// window, and Mission Control hides it.
+const RING_BEHAVIOR: usize = (1 << 1) | (1 << 3) | (1 << 6) | (1 << 8);
 const CORNER_RADIUS: f64 = 10.0;
 const BORDER_WIDTH: f64 = 2.0;
 
@@ -42,11 +47,23 @@ pub struct OverlayWindow {
     window: Id,
     layer: Id,
     color: Option<[f32; 4]>,
+    /// The width and radius a ring was last drawn with.
+    ring: Option<(f64, f64)>,
     visible: bool,
 }
 
 impl OverlayWindow {
+    /// The drop highlight, which stays put whatever the Spaces do.
     pub fn new() -> Option<Self> {
+        Self::with_behavior(COLLECTION_BEHAVIOR)
+    }
+
+    /// The ring around the focused window.
+    pub fn ring() -> Option<Self> {
+        Self::with_behavior(RING_BEHAVIOR)
+    }
+
+    fn with_behavior(behavior: usize) -> Option<Self> {
         unsafe {
             let app: Id = msg!(class(c"NSApplication"), "sharedApplication"; -> Id);
             if app.is_null() {
@@ -54,7 +71,8 @@ impl OverlayWindow {
             }
             // No Dock icon, no menu bar: cberry stays a background tool.
             let _: i8 = msg!(app, "setActivationPolicy:", NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY => isize; -> i8);
-            msg!(app, "finishLaunching");
+            static LAUNCH: Once = Once::new();
+            LAUNCH.call_once(|| msg!(app, "finishLaunching"));
 
             let window: Id = msg!(class(c"NSWindow"), "alloc"; -> Id);
             let window: Id = msg!(window, "initWithContentRect:styleMask:backing:defer:",
@@ -72,7 +90,7 @@ impl OverlayWindow {
             msg!(window, "setIgnoresMouseEvents:", YES => i8);
             let clear: Id = msg!(class(c"NSColor"), "clearColor"; -> Id);
             msg!(window, "setBackgroundColor:", clear => Id);
-            msg!(window, "setCollectionBehavior:", COLLECTION_BEHAVIOR => usize);
+            msg!(window, "setCollectionBehavior:", behavior => usize);
             msg!(window, "setAnimationBehavior:", NS_WINDOW_ANIMATION_BEHAVIOR_NONE => isize);
 
             let view: Id = msg!(window, "contentView"; -> Id);
@@ -88,6 +106,7 @@ impl OverlayWindow {
                 window,
                 layer,
                 color: None,
+                ring: None,
                 visible: false,
             })
         }
@@ -111,7 +130,51 @@ impl OverlayWindow {
                 self.color = Some(color);
             }
             msg!(catx, "commit");
+            self.place(rect, above);
+        }
+    }
 
+    /// Shows a ring just outside `rect` (top-left global coordinates), just
+    /// above window `above`. `radius` is the roundness of the window's own
+    /// corners, so that the ring follows them.
+    pub fn show_ring(
+        &mut self,
+        rect: Rect,
+        above: WinId,
+        color: [f32; 4],
+        width: i32,
+        radius: i32,
+    ) {
+        let outer = Rect::new(
+            rect.x - width,
+            rect.y - width,
+            rect.w + 2 * width,
+            rect.h + 2 * width,
+        );
+        let ring = (f64::from(width), f64::from(radius + width));
+        unsafe {
+            let catx = class(c"CATransaction");
+            msg!(catx, "begin");
+            msg!(catx, "setDisableActions:", YES => i8);
+            if self.color != Some(color) || self.ring != Some(ring) {
+                let [r, g, b, a] = color.map(f64::from);
+                let border = CGColorCreateSRGB(r, g, b, a);
+                msg!(self.layer, "setBorderColor:", border => CFTypeRef);
+                CGColorRelease(border);
+                msg!(self.layer, "setBorderWidth:", ring.0 => f64);
+                msg!(self.layer, "setCornerRadius:", ring.1 => f64);
+                self.color = Some(color);
+                self.ring = Some(ring);
+            }
+            msg!(catx, "commit");
+            self.place(outer, above);
+        }
+    }
+
+    /// Puts the window over `rect`, just above window `above`.
+    unsafe fn place(&mut self, rect: Rect, above: WinId) {
+        unsafe {
+            let catx = class(c"CATransaction");
             // Cocoa puts the origin at the bottom-left of the primary display.
             let screen_h = CGDisplayBounds(CGMainDisplayID()).size.height;
             let frame = CGRect {

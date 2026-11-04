@@ -10,7 +10,9 @@ use crate::command::{Command, DisplayTarget, Zoom};
 use crate::config::{Config, MouseAction, app_matches};
 use crate::geometry::{Direction, Rect};
 use crate::motion::Mover;
-use crate::platform::{Backend, Display, Modifier, MouseButton, Overlay, WindowEvent, WindowInfo};
+use crate::platform::{
+    Backend, Border, Display, Modifier, MouseButton, Overlay, WindowEvent, WindowInfo,
+};
 
 /// The layout of a Space (virtual desktop) other than the current one: on
 /// another display, or not on screen.
@@ -57,6 +59,12 @@ pub struct Manager<B: Backend> {
     /// stops that resize where it fits: the first time cberry learns a
     /// window's minimum is by going past it.
     resize_anchor: Option<ResizeRun>,
+    /// The ring on screen, if any.
+    shown_border: Option<Border>,
+    /// The ring needs putting back on top of its window.
+    border_covered: bool,
+    /// The ring is following a window the user holds by its title bar.
+    border_tracking: bool,
     /// The drop highlight on screen, if any.
     shown_overlay: Option<Overlay>,
     /// The Space shown before the current one, for `space recent`.
@@ -83,6 +91,8 @@ pub struct Manager<B: Backend> {
     /// rest: dialogs, and the invisible helper windows many apps and tools
     /// keep on screen).
     manageable: HashSet<WinId>,
+    /// Those of them cberry can move, though perhaps not resize.
+    movable: HashSet<WinId>,
     /// The modifier last given to the backend.
     mouse_modifier: Option<Modifier>,
     /// The gesture button at the previous frame.
@@ -192,6 +202,9 @@ impl<B: Backend> Manager<B> {
             focused: None,
             min_sizes: MinSizes::new(),
             resize_anchor: None,
+            shown_border: None,
+            border_covered: false,
+            border_tracking: false,
             shown_overlay: None,
             previous_space: None,
             reported_focus: None,
@@ -203,6 +216,7 @@ impl<B: Backend> Manager<B> {
             before_drag: HashMap::new(),
             stack: Vec::new(),
             manageable: HashSet::new(),
+            movable: HashSet::new(),
             mouse_modifier: None,
             gesture_was: None,
             clock: 0.0,
@@ -263,6 +277,11 @@ impl<B: Backend> Manager<B> {
 
     pub fn is_animating(&self) -> bool {
         !self.mover.at_rest()
+    }
+
+    /// Whether something moves by the user's hand: frames must not wait.
+    pub fn is_held(&self) -> bool {
+        self.border_tracking
     }
 
     /// Waits for the next frame of a motion. `remaining` is what is left of
@@ -480,6 +499,8 @@ impl<B: Backend> Manager<B> {
             }
         }
 
+        // A window may have been raised over the ring.
+        self.border_covered = true;
         self.floating.retain(|w| alive.contains(w));
         if !self.synced {
             self.synced = true;
@@ -511,6 +532,7 @@ impl<B: Backend> Manager<B> {
             .filter(|w| w.tileable)
             .map(|w| w.id)
             .collect();
+        self.movable = windows.iter().filter(|w| w.movable).map(|w| w.id).collect();
         let mut new = Vec::new();
         for info in windows {
             if !self.mover.in_motion(info.id) {
@@ -1358,7 +1380,41 @@ impl<B: Backend> Manager<B> {
 
     /// Lets the platform UI process its events; call once per frame.
     pub fn pump(&mut self) {
+        self.update_border();
         self.backend.pump();
+    }
+
+    /// Where the ring goes this frame: around the focused window, wherever
+    /// that is, moving with it.
+    fn wanted_border(&mut self) -> Option<Border> {
+        self.border_tracking = false;
+        if !self.config.border {
+            return None;
+        }
+        let id = self
+            .reported_focus
+            .filter(|id| self.stack.contains(id) && self.movable.contains(id))?;
+        // A window dragged by its title bar tells nobody where it is going.
+        let dragged = self.backend.mouse_down() && !matches!(self.drag, Drag::Gesture(_));
+        let live = dragged.then(|| self.backend.server_frame(id)).flatten();
+        self.border_tracking = live.is_some();
+        let rect = live.or_else(|| self.frames.get(&id).copied())?;
+        Some(Border {
+            rect,
+            above: id,
+            color: self.config.border_color,
+            width: self.config.border_width,
+            radius: self.config.border_radius,
+        })
+    }
+
+    fn update_border(&mut self) {
+        let wanted = self.wanted_border();
+        let covered = std::mem::take(&mut self.border_covered);
+        if wanted != self.shown_border || (covered && wanted.is_some()) {
+            self.shown_border = wanted;
+            self.backend.show_border(wanted);
+        }
     }
 
     fn press(&mut self) {
@@ -2536,6 +2592,9 @@ pub(crate) mod tests {
         /// Windows only reach another Space with the user along, by the
         /// title bar, as on recent macOS.
         pub carries: bool,
+        pub border: Option<Border>,
+        pub border_calls: usize,
+        pub server_frames: HashMap<WinId, Rect>,
     }
 
     impl MockBackend {
@@ -2693,6 +2752,13 @@ pub(crate) mod tests {
         }
         fn window_frame(&mut self, id: WinId) -> Option<Rect> {
             self.windows.iter().find(|w| w.id == id).map(|w| w.frame)
+        }
+        fn server_frame(&mut self, id: WinId) -> Option<Rect> {
+            self.server_frames.get(&id).copied()
+        }
+        fn show_border(&mut self, border: Option<Border>) {
+            self.border = border;
+            self.border_calls += 1;
         }
         fn show_overlay(&mut self, overlay: Option<Overlay>) {
             self.overlay = overlay;
@@ -5397,5 +5463,99 @@ pub(crate) mod tests {
             run(&mut m, "daemon-version").unwrap().trim(),
             env!("CARGO_PKG_VERSION")
         );
+    }
+
+    fn bordered() -> Manager<MockBackend> {
+        let mut m = manager(0.42);
+        run(&mut m, "config border on").unwrap();
+        m.backend.open(1, "Terminal");
+        m.backend.open(2, "Notes");
+        m.refresh();
+        settle(&mut m);
+        m.refresh();
+        m.pump();
+        m
+    }
+
+    #[test]
+    fn no_border_unless_asked_for() {
+        let mut m = manager(0.0);
+        m.backend.open(1, "Terminal");
+        m.refresh();
+        m.pump();
+        assert_eq!(m.backend().border_calls, 0);
+    }
+
+    #[test]
+    fn the_border_goes_round_the_focused_window() {
+        let m = bordered();
+        let border = m.backend().border.unwrap();
+        assert_eq!(border.above, 2);
+        assert_eq!(border.rect, m.backend().frame(2));
+    }
+
+    #[test]
+    fn the_border_follows_focus() {
+        let mut m = bordered();
+        m.backend.focused = Some(1);
+        m.refresh();
+        m.pump();
+        assert_eq!(m.backend().border.unwrap().above, 1);
+    }
+
+    #[test]
+    fn the_border_moves_with_the_window_in_flight() {
+        let mut m = bordered();
+        m.backend.close(1);
+        m.refresh();
+        m.tick(1.0 / 60.0);
+        m.tick(1.0 / 60.0);
+        m.pump();
+        assert!(m.is_animating());
+        assert_eq!(m.backend().border.unwrap().rect, m.backend().frame(2));
+    }
+
+    #[test]
+    fn a_still_border_is_left_alone() {
+        let mut m = bordered();
+        let calls = m.backend().border_calls;
+        for _ in 0..10 {
+            m.pump();
+        }
+        assert_eq!(m.backend().border_calls, calls);
+    }
+
+    #[test]
+    fn the_border_goes_when_turned_off_or_the_window_closes() {
+        let mut m = bordered();
+        m.backend.close(2);
+        m.backend.close(1);
+        m.backend.focused = None;
+        m.refresh();
+        m.pump();
+        assert_eq!(m.backend().border, None);
+        let mut m = bordered();
+        run(&mut m, "config border off").unwrap();
+        m.pump();
+        assert_eq!(m.backend().border, None);
+    }
+
+    #[test]
+    fn the_border_follows_a_window_dragged_by_its_title_bar_at_full_speed() {
+        let mut m = bordered();
+        assert!(!m.is_held());
+        m.backend.mouse = true;
+        m.backend
+            .server_frames
+            .insert(2, Rect::new(40, 50, 300, 200));
+        m.pump();
+        assert_eq!(
+            m.backend().border.unwrap().rect,
+            Rect::new(40, 50, 300, 200)
+        );
+        assert!(m.is_held(), "frames follow the display");
+        m.backend.mouse = false;
+        m.pump();
+        assert!(!m.is_held());
     }
 }

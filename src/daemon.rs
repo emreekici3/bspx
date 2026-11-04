@@ -196,7 +196,7 @@ pub fn run<B: Backend>(
 
         // Where the windows really went, once they stop: apps that refused
         // a size, a window that does not fit after all.
-        let animating = manager.is_animating();
+        let animating = manager.is_animating() || manager.is_held();
         look |= was_animating && !animating;
         was_animating = animating;
 
@@ -214,7 +214,7 @@ pub fn run<B: Backend>(
         // Sleep only what is left of the frame, so frames stay evenly spaced
         // however long this one's work took. The windows are written by
         // their apps' own threads, so a slow app does not make it late.
-        if manager.is_animating() {
+        if manager.is_animating() || manager.is_held() {
             let remaining = manager
                 .frame_interval()
                 .saturating_sub(frame_start.elapsed());

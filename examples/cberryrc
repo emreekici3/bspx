@@ -61,6 +61,12 @@ cberry rule float "Archive Utility"
 # A Space whose windows are not tiled:
 # cberry layout coding float
 
+# A ring around the focused window. Set border_radius to your apps' corners.
+# cberry config border on
+# cberry config border_color 8aa9f8
+# cberry config border_width 2
+# cberry config border_radius 12
+
 # Keyboard shortcuts. `cberry ...` commands run inside
 # cberry; anything else runs in your shell. `cberry bind` lists them.
 cberry bind 'alt - h : cberry focus left'

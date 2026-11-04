@@ -37,6 +37,14 @@ pub struct Config {
     pub drag_swap: bool,
     /// Drop-target highlight colour, RGBA in 0..=1.
     pub drag_color: [f32; 4],
+    /// Draw a ring around the focused window.
+    pub border: bool,
+    /// The ring's colour, RGBA in 0..=1.
+    pub border_color: [f32; 4],
+    /// The ring's width, in points.
+    pub border_width: i32,
+    /// The roundness of windows' corners, for the ring to follow, in points.
+    pub border_radius: i32,
     /// Held with a click anywhere on a window, moves or resizes it.
     pub mouse_modifier: Option<Modifier>,
     /// Held as well while moving a tiled window with the modifier, dropping
@@ -108,6 +116,10 @@ impl Default for Config {
             rule_carry: true,
             drag_swap: true,
             drag_color: [0.37, 0.62, 1.0, 0.25],
+            border: false,
+            border_color: [0.541, 0.663, 0.973, 1.0],
+            border_width: 2,
+            border_radius: 12,
             mouse_modifier: Some(Modifier::Alt),
             mouse_insert_modifier: None,
             mouse_action1: MouseAction::Move,
@@ -145,6 +157,10 @@ pub const KEYS: &[&str] = &[
     "rule_carry",
     "drag_swap",
     "drag_color",
+    "border",
+    "border_color",
+    "border_width",
+    "border_radius",
     "mouse_modifier",
     "mouse_insert_modifier",
     "mouse_action1",
@@ -392,6 +408,27 @@ impl Config {
                     format!("drag_color: '{v}' is not a colour like 5e9eff or 5e9eff40")
                 })?;
             }
+            "border" => self.border = on_off(key, one(key, args)?)?,
+            "border_color" => {
+                let v = one(key, args)?;
+                self.border_color = parse_color(v).ok_or_else(|| {
+                    format!("border_color: '{v}' is not a colour like 8aa9f8 or 8aa9f8c0")
+                })?;
+            }
+            "border_width" => {
+                let v: i32 = number(key, one(key, args)?)?;
+                if !(1..=20).contains(&v) {
+                    return Err("border_width: must be between 1 and 20".into());
+                }
+                self.border_width = v;
+            }
+            "border_radius" => {
+                let v: i32 = number(key, one(key, args)?)?;
+                if !(0..=40).contains(&v) {
+                    return Err("border_radius: must be between 0 and 40".into());
+                }
+                self.border_radius = v;
+            }
             "mouse_modifier" | "mouse_insert_modifier" => {
                 let v = one(key, args)?;
                 let modifier = match v {
@@ -446,6 +483,10 @@ impl Config {
                 .log_level
                 .map_or("default".into(), |l| l.as_str().to_lowercase()),
             "drag_color" => format_color(self.drag_color),
+            "border" => on_off_name(self.border),
+            "border_color" => format_color(self.border_color),
+            "border_width" => self.border_width.to_string(),
+            "border_radius" => self.border_radius.to_string(),
             "mouse_modifier" => self
                 .mouse_modifier
                 .map_or("off", Modifier::name)

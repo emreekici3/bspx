@@ -18,7 +18,7 @@ use log::{debug, info, warn};
 
 use self::ffi::*;
 use self::overlay::OverlayWindow;
-use super::{Backend, Display, Modifier, MouseButton, Overlay, WindowEvent, WindowInfo};
+use super::{Backend, Border, Display, Modifier, MouseButton, Overlay, WindowEvent, WindowInfo};
 use crate::bsp::WinId;
 use crate::geometry::{Dock, DockEdge, Rect, usable_area};
 
@@ -580,6 +580,8 @@ impl FocusApi {
     }
 }
 
+type SLSGetWindowBoundsFn = unsafe extern "C" fn(i32, u32, *mut CGRect) -> i32;
+
 /// Listing the Spaces and moving windows between them.
 struct SpaceApi {
     list: Option<SLSCopyManagedDisplaySpacesFn>,
@@ -980,6 +982,9 @@ pub struct MacBackend {
     connection: i32,
     /// Created the first time a drop target is highlighted.
     overlay: Option<OverlayWindow>,
+    window_bounds: Option<SLSGetWindowBoundsFn>,
+    /// The ring around the focused window, once one was asked for.
+    border: Option<OverlayWindow>,
     /// Write the frames, a thread per app.
     vsync: vsync::Vsync,
     /// Whether the window server may still heed these ways of moving a
@@ -1020,6 +1025,8 @@ impl MacBackend {
             alive: HashSet::new(),
             connection: unsafe { CGSMainConnectionID() },
             overlay: None,
+            window_bounds: unsafe { lookup(c"SLSGetWindowBounds") },
+            border: None,
             vsync: vsync::Vsync::default(),
             tag_moves: true,
             direct_moves: true,
@@ -1587,6 +1594,19 @@ impl Backend for MacBackend {
         self.ax_frame(element)
     }
 
+    fn server_frame(&mut self, id: WinId) -> Option<Rect> {
+        let read = self.window_bounds?;
+        let mut r = CGRect::default();
+        (unsafe { read(self.connection, id, &raw mut r) } == 0).then(|| {
+            Rect::new(
+                r.origin.x.round() as i32,
+                r.origin.y.round() as i32,
+                r.size.width.round() as i32,
+                r.size.height.round() as i32,
+            )
+        })
+    }
+
     fn show_overlay(&mut self, overlay: Option<Overlay>) {
         match overlay {
             Some(o) => {
@@ -1608,10 +1628,28 @@ impl Backend for MacBackend {
         }
     }
 
+    fn show_border(&mut self, border: Option<Border>) {
+        let Some(b) = border else {
+            if let Some(w) = &mut self.border {
+                w.hide();
+            }
+            return;
+        };
+        if self.border.is_none() {
+            self.border = OverlayWindow::ring();
+            if self.border.is_none() {
+                warn!("cannot create the border window");
+            }
+        }
+        if let Some(w) = &mut self.border {
+            w.show_ring(b.rect, b.above, b.color, b.width, b.radius);
+        }
+    }
+
     fn pump(&mut self) {
         // Deliver pending AX notifications (they arrive as run loop sources).
         unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.0, 0) };
-        if let Some(w) = &mut self.overlay {
+        if let Some(w) = self.overlay.as_mut().or(self.border.as_mut()) {
             w.pump();
         }
     }

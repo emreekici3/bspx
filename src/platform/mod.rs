@@ -130,9 +130,16 @@ pub trait Backend {
     fn window_frame(&mut self, _id: WinId) -> Option<Rect> {
         None
     }
+    /// Where the window server has a window right now: quick and exact, even
+    /// while its app is dragged around by the user.
+    fn server_frame(&mut self, id: WinId) -> Option<Rect> {
+        self.window_frame(id)
+    }
     /// Shows the drop-target highlight over `rect`, placed just above window
     /// `above`, or hides it with `None`.
     fn show_overlay(&mut self, _overlay: Option<Overlay>) {}
+    /// Shows the ring around the focused window, or hides it with `None`.
+    fn show_border(&mut self, _border: Option<Border>) {}
     /// Lets the platform UI (the overlay window) process its events. Called
     /// once per frame.
     fn pump(&mut self) {}
@@ -243,6 +250,20 @@ pub enum WindowEvent {
     /// The window was moved or resized: by the user, by its app, or by cberry
     /// itself.
     Moved(WinId),
+}
+
+/// The ring around the focused window.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Border {
+    /// The window's frame; the ring goes outside it.
+    pub rect: Rect,
+    /// The window the ring sits on (it is stacked just above it).
+    pub above: WinId,
+    /// RGBA, 0..=1.
+    pub color: [f32; 4],
+    pub width: i32,
+    /// The roundness of the window's corners.
+    pub radius: i32,
 }
 
 /// The translucent highlight shown over a drop target while a window is dragged.
