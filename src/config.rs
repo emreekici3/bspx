@@ -253,6 +253,11 @@ fn is_invisible(c: char) -> bool {
 
 /// Parses `RRGGBB` or `RRGGBBAA`, with an optional `#` or `0x` prefix.
 fn parse_color(value: &str) -> Option<[f32; 4]> {
+    parse_color_or(value, 0.25)
+}
+
+/// A colour as `RRGGBB` or `RRGGBBAA`, with `alpha` if it does not say.
+fn parse_color_or(value: &str, alpha: f32) -> Option<[f32; 4]> {
     let hex = value
         .strip_prefix('#')
         .or_else(|| value.strip_prefix("0x"))
@@ -265,7 +270,7 @@ fn parse_color(value: &str) -> Option<[f32; 4]> {
             .ok()
             .map(|b| f32::from(b) / 255.0)
     };
-    let alpha = if hex.len() == 8 { byte(6)? } else { 0.25 };
+    let alpha = if hex.len() == 8 { byte(6)? } else { alpha };
     Some([byte(0)?, byte(2)?, byte(4)?, alpha])
 }
 
@@ -414,7 +419,7 @@ impl Config {
             "border" => self.border = on_off(key, one(key, args)?)?,
             "border_color" => {
                 let v = one(key, args)?;
-                self.border_color = parse_color(v).ok_or_else(|| {
+                self.border_color = parse_color_or(v, 1.0).ok_or_else(|| {
                     format!("border_color: '{v}' is not a colour like 8aa9f8 or 8aa9f8c0")
                 })?;
             }
@@ -784,5 +789,14 @@ mod tests {
             copy.set(key, &args).unwrap();
             assert_eq!(copy.get(key).unwrap(), value, "{key}");
         }
+    }
+
+    #[test]
+    fn a_border_colour_is_opaque_unless_it_says_otherwise() {
+        let mut c = Config::default();
+        c.set("border_color", &["ffffff"]).unwrap();
+        assert_eq!(c.border_color, [1.0, 1.0, 1.0, 1.0]);
+        c.set("border_color", &["ffffff80"]).unwrap();
+        assert!((c.border_color[3] - 0.502).abs() < 0.01);
     }
 }
