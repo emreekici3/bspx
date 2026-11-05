@@ -66,7 +66,8 @@ pub struct Config {
     /// Space names, by Space number (from 1, as in Mission Control).
     pub labels: BTreeMap<usize, String>,
     /// Apps whose new windows go to a Space: (app, Space number or label).
-    pub space_rules: Vec<(String, String)>,
+    /// App, Space, and whether to go there with its window.
+    pub space_rules: Vec<(String, String, bool)>,
     /// Apps whose new windows float at a grid cell:
     /// (app, [rows, cols, x, y, w, h]).
     pub grid_rules: Vec<(String, [u32; 6])>,
@@ -521,9 +522,10 @@ impl Config {
     }
 
     /// `cberry rule space <space> <app>`.
-    pub fn set_space_rule(&mut self, app: &str, space: &str) {
-        self.space_rules.retain(|(a, _)| !same_rule(a, app));
-        self.space_rules.push((app.to_string(), space.to_string()));
+    pub fn set_space_rule(&mut self, app: &str, space: &str, follow: bool) {
+        self.space_rules.retain(|(a, _, _)| !same_rule(a, app));
+        self.space_rules
+            .push((app.to_string(), space.to_string(), follow));
     }
 
     /// `cberry rule grid <rows:cols:x:y:w:h> <app>`.
@@ -709,9 +711,9 @@ mod tests {
         c.set_float_space("web", true);
         c.set_float_space("3", false); // the same Space, by number
         assert!(c.float_spaces.is_empty());
-        c.set_space_rule("Safari", "web");
-        c.set_space_rule("Safari", "2");
-        assert_eq!(c.space_rules, vec![("Safari".into(), "2".into())]);
+        c.set_space_rule("Safari", "web", false);
+        c.set_space_rule("Safari", "2", true);
+        assert_eq!(c.space_rules, vec![("Safari".into(), "2".into(), true)]);
     }
 
     #[test]
@@ -764,9 +766,9 @@ mod tests {
         c.set_float_app("/Whats/", false);
         assert!(!c.float_apps.contains(&"/Whats/".to_string()));
         assert!(c.float_apps.contains(&"WhatsApp".to_string()));
-        c.set_space_rule("/Webex/", "2");
-        c.set_space_rule("/Webex/", "3");
-        assert_eq!(c.space_rules, vec![("/Webex/".into(), "3".into())]);
+        c.set_space_rule("/Webex/", "2", false);
+        c.set_space_rule("/Webex/", "3", false);
+        assert_eq!(c.space_rules, vec![("/Webex/".into(), "3".into(), false)]);
     }
 
     #[test]

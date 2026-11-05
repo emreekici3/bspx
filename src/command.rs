@@ -66,7 +66,12 @@ pub enum Command {
     Rule { float: bool, app: String },
     /// Send the windows of an app to a Space when they open. `space` is a
     /// Space number or label, looked up when a window opens.
-    SpaceRule { space: String, app: String },
+    SpaceRule {
+        space: String,
+        app: String,
+        /// Go there with the window.
+        follow: bool,
+    },
     /// Float the windows of an app at a grid cell when they open:
     /// `[rows, cols, x, y, w, h]`.
     GridRule { grid: [u32; 6], app: String },
@@ -301,14 +306,17 @@ impl Command {
                 let space = words
                     .get(2)
                     .ok_or("rule space: missing Space number or label")?;
-                if words.len() < 4 {
+                let follow = words.last() == Some(&"--follow");
+                let end = words.len() - usize::from(follow);
+                if end < 4 {
                     return Err("rule space: missing app name".into());
                 }
-                let app = words[3..].join(" ");
+                let app = words[3..end].join(" ");
                 check_app_pattern(&app)?;
                 return Ok(Command::SpaceRule {
                     space: (*space).to_string(),
                     app,
+                    follow,
                 });
             }
             Some("rule") => {
@@ -393,10 +401,20 @@ mod tests {
             Command::parse("rule space web Google Chrome"),
             Ok(Command::SpaceRule {
                 space: "web".into(),
-                app: "Google Chrome".into()
+                app: "Google Chrome".into(),
+                follow: false,
+            })
+        );
+        assert_eq!(
+            Command::parse("rule space web Safari --follow"),
+            Ok(Command::SpaceRule {
+                space: "web".into(),
+                app: "Safari".into(),
+                follow: true,
             })
         );
         assert!(Command::parse("rule space web").is_err());
+        assert!(Command::parse("rule space web --follow").is_err());
     }
 
     #[test]

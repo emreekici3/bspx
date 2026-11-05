@@ -822,12 +822,12 @@ impl<B: Backend> Manager<B> {
     /// Sends a newly opened window to the Space its app's rule names.
     /// Returns whether it went.
     fn send_by_rule(&mut self, id: WinId, app: &str) -> bool {
-        let Some(space) = self
+        let Some((space, follow)) = self
             .config
             .space_rules
             .iter()
-            .find(|(a, _)| app_matches(a, app))
-            .map(|(_, s)| s.clone())
+            .find(|(a, _, _)| app_matches(a, app))
+            .map(|(_, s, f)| (s.clone(), *f))
         else {
             return false;
         };
@@ -848,6 +848,12 @@ impl<B: Backend> Manager<B> {
         };
         if moved {
             info!("window {id} of {app} sent to Space {n}");
+            if follow {
+                if let Err(e) = self.backend.show_space(sid) {
+                    warn!("could not go to Space {n}: {e}");
+                }
+                self.keep_focus(id);
+            }
             true
         } else {
             warn!("could not send window {id} of {app} to Space {n}");
@@ -1443,6 +1449,14 @@ impl<B: Backend> Manager<B> {
         self.hold_focus();
         self.update_border();
         self.backend.pump();
+    }
+
+    /// Focuses a window on a Space just switched to.
+    fn keep_focus(&mut self, win: WinId) {
+        self.focused = Some(win);
+        self.backend.focus(win);
+        let now = std::time::Instant::now();
+        self.holding_focus = Some((win, now + HOLD_FOCUS, now + HOLD_FOCUS_RETRY));
     }
 
     /// Takes focus back for the window it belongs to, for as long as macOS
@@ -2490,8 +2504,12 @@ impl<B: Backend> Manager<B> {
                 self.config.set_label(n, name);
                 return Ok(String::new());
             }
-            Command::SpaceRule { ref space, ref app } => {
-                self.config.set_space_rule(app, space);
+            Command::SpaceRule {
+                ref space,
+                ref app,
+                follow,
+            } => {
+                self.config.set_space_rule(app, space, follow);
                 return Ok(String::new());
             }
             Command::GridRule { grid, ref app } => {
@@ -2559,10 +2577,7 @@ impl<B: Backend> Manager<B> {
                     .take()
                     .filter(|(_, to, at)| *to == sid && at.elapsed() < FOLLOW_SENT)
                 {
-                    self.focused = Some(win);
-                    self.backend.focus(win);
-                    let now = std::time::Instant::now();
-                    self.holding_focus = Some((win, now + HOLD_FOCUS, now + HOLD_FOCUS_RETRY));
+                    self.keep_focus(win);
                 }
                 return Ok(String::new());
             }
@@ -4588,6 +4603,22 @@ pub(crate) mod tests {
         m.refresh();
         assert_eq!(m.backend().space_of[&3], 20);
         assert_eq!(m.tree().windows(), vec![2, 3]);
+    }
+
+    #[test]
+    fn space_rule_can_take_you_with_the_window() {
+        let mut m = three_spaces();
+        m.execute(&Command::parse("rule space web Safari --follow").unwrap())
+            .unwrap();
+        m.backend.open(1, "Terminal");
+        m.refresh();
+        m.backend.open(2, "Safari");
+        m.refresh();
+        assert_eq!(m.backend().space_of[&2], 20);
+        assert_eq!(m.backend().active, 20);
+        assert_eq!(m.backend().focused, Some(2));
+        m.refresh();
+        assert_eq!(m.tree().windows(), vec![2]);
     }
 
     #[test]

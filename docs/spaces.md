@@ -11,7 +11,7 @@ cberry label 3 coding
 cberry rule space web "Safari"
 ```
 
-New Safari windows then go to Space 2. Windows that were already open stay where they are. `cberry space web` switches to Space 2, and `cberry send web` (or `cberry send 2`) moves the focused window there, e.g. with these shortcuts:
+New Safari windows then go to Space 2. With `--follow` you go with them: `cberry rule space web "Safari" --follow`. Windows that were already open stay where they are. `cberry space web` switches to Space 2, and `cberry send web` (or `cberry send 2`) moves the focused window there, e.g. with these shortcuts:
 
 ```sh
 cberry bind 'alt - 1 : cberry space 1'
