@@ -1,6 +1,6 @@
 # cranberry
 
-A BSP tiling window manager for macOS. Every Space and display keeps its own layout. SIP stays on.
+A BSP tiling window manager for macOS.
 
 ## Install
 
