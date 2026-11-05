@@ -68,7 +68,7 @@ pub enum Command {
     /// Space number or label, looked up when a window opens.
     SpaceRule { space: String, app: String },
     /// Float the windows of an app at a grid cell when they open:
-    /// `[rows, cols, x, y, w, h]`, as in yabai's `grid=`.
+    /// `[rows, cols, x, y, w, h]`.
     GridRule { grid: [u32; 6], app: String },
     /// How round the ring around an app's windows is.
     BorderRadiusRule { radius: i32, app: String },

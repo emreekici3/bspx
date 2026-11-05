@@ -5,6 +5,7 @@ mod desktop;
 mod events;
 mod ffi;
 mod hotkeys;
+mod instant;
 mod overlay;
 mod tap;
 mod vsync;
@@ -748,6 +749,94 @@ impl MacBackend {
 }
 
 impl MacBackend {
+    /// Waits for `done`, which a slow window server can leave for a moment.
+    fn settles(&mut self, mut done: impl FnMut(&mut Self) -> bool) -> bool {
+        let start = std::time::Instant::now();
+        while start.elapsed() < INSTANT_WAIT {
+            if done(self) {
+                return true;
+            }
+            std::thread::sleep(INSTANT_POLL);
+        }
+        done(self)
+    }
+
+    /// Moves a window to `space` without touching it.
+    fn move_at_once(&mut self, id: WinId, space: u64) -> bool {
+        let wid = i64::from(id);
+        let number = Cf::owned(unsafe {
+            CFNumberCreate(ptr::null(), kCFNumberSInt64Type, (&raw const wid).cast())
+        });
+        let Some(number) = number else {
+            return false;
+        };
+        let value = number.ptr();
+        let array = Cf::owned(unsafe {
+            CFArrayCreate(
+                ptr::null(),
+                &raw const value,
+                1,
+                &raw const kCFTypeArrayCallBacks,
+            )
+        });
+        let Some(array) = array else {
+            return false;
+        };
+        instant::move_windows(array.ptr(), space)
+            && self.settles(|b| b.window_spaces(&[id]).get(&id) == Some(&space))
+    }
+
+    /// Switches to `space` on the same display, without the slide. False
+    /// leaves the switch to the keyboard shortcut.
+    fn switch_at_once(&mut self, space: u64) -> bool {
+        let current = self.active_space();
+        if current == space {
+            return true;
+        }
+        let spaces = self.display_spaces(current);
+        let at = |wanted| spaces.iter().position(|s| *s == wanted);
+        let (Some(from), Some(to)) = (at(current), at(space)) else {
+            return false;
+        };
+        // Its Spaces do not follow swipes, and it is no fault of theirs.
+        if spaces_sliding(self.connection) || self.mission_control_open() {
+            return false;
+        }
+        let steps = to as i32 - from as i32;
+        if instant::swipe(steps) && self.settles(|b| b.active_space() == space) {
+            self.switch_misses = 0;
+            return true;
+        }
+        self.switch_misses += 1;
+        if self.switch_misses == INSTANT_MISSES {
+            warn!("switching Spaces at once does not work here");
+        }
+        false
+    }
+
+    /// Whether Mission Control is open: the Dock then has a window as large
+    /// as the display. It has none otherwise, whether it shows or not.
+    fn mission_control_open(&self) -> bool {
+        unsafe {
+            let display = CGDisplayBounds(CGMainDisplayID());
+            let options = kCGWindowListOptionOnScreenOnly;
+            let Some(list) = Cf::owned(CGWindowListCopyWindowInfo(options, kCGNullWindowID)) else {
+                return false;
+            };
+            (0..CFArrayGetCount(list.ptr())).any(|i| {
+                let info = CFArrayGetValueAtIndex(list.ptr(), i);
+                let owner = string_value(CFDictionaryGetValue(info, kCGWindowOwnerName));
+                let bounds = CFDictionaryGetValue(info, kCGWindowBounds);
+                let mut frame = CGRect::default();
+                owner.as_deref() == Some("Dock")
+                    && !bounds.is_null()
+                    && CGRectMakeWithDictionaryRepresentation(bounds, &mut frame)
+                    && frame.size.width >= display.size.width
+                    && frame.size.height >= display.size.height
+            })
+        }
+    }
+
     /// The number of the *Switch to Desktop N* shortcut for `space`. macOS
     /// numbers desktops on from one display to the next: with two on the
     /// first display, the second display's first is Desktop 3.
@@ -765,6 +854,12 @@ impl MacBackend {
         n
     }
 }
+
+/// How many in a row can fail before the slower way is taken for good.
+const INSTANT_MISSES: u8 = 3;
+/// How long a move or switch at once is given to show.
+const INSTANT_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
+const INSTANT_POLL: std::time::Duration = std::time::Duration::from_millis(5);
 
 /// Whether the main display's Spaces are still sliding. A swipe let go of
 /// halfway takes its time going back, however it ended.
@@ -1001,6 +1096,9 @@ pub struct MacBackend {
     vsync: vsync::Vsync,
     /// Whether the window server may still heed these ways of moving a
     /// window to another Space.
+    /// Moves and switches at once that failed in a row.
+    move_misses: u8,
+    switch_misses: u8,
     tag_moves: bool,
     direct_moves: bool,
     writers: writer::Writers,
@@ -1040,6 +1138,8 @@ impl MacBackend {
             window_bounds: unsafe { lookup(c"SLSGetWindowBounds") },
             border: None,
             vsync: vsync::Vsync::default(),
+            move_misses: 0,
+            switch_misses: 0,
             tag_moves: true,
             direct_moves: true,
             writers: writer::Writers::default(),
@@ -1232,7 +1332,7 @@ impl MacBackend {
         );
     }
 
-    /// The writes that put a window at its final frame. As in yabai: macOS
+    /// The writes that put a window at its final frame. macOS
     /// cuts a resize short where it would take the window past the screen
     /// edge, so when both change the size is set before the move (to fit
     /// where the window is going) and again after it (in case the old
@@ -1515,6 +1615,16 @@ impl Backend for MacBackend {
     fn place_on_space(&mut self, id: WinId, space: u64) -> bool {
         // Trust only what the window server says afterwards. A call it
         // ignored once it will ignore again: no use waiting for it each time.
+        if self.move_misses < INSTANT_MISSES {
+            if self.move_at_once(id, space) {
+                self.move_misses = 0;
+                return true;
+            }
+            self.move_misses += 1;
+            if self.move_misses == INSTANT_MISSES {
+                warn!("moving windows between Spaces at once does not work here");
+            }
+        }
         if self.tag_moves {
             self.space_api.move_by_tag(self.connection, id, space);
             if self.window_spaces(&[id]).get(&id) == Some(&space) {
@@ -1553,6 +1663,9 @@ impl Backend for MacBackend {
     fn show_space(&mut self, space: u64) -> Result<(), String> {
         let n = self.desktop_number(space).ok_or("no such Space")?;
         debug!("showing Space {space}: Desktop {n}");
+        if self.switch_misses < INSTANT_MISSES && self.switch_at_once(space) {
+            return Ok(());
+        }
         desktop::switch(n)
     }
 

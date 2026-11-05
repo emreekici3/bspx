@@ -1,7 +1,7 @@
 //! Switching Spaces, and carrying a window along, through the macOS
 //! "Switch to Desktop N" keyboard shortcuts (System Settings > Keyboard >
-//! Keyboard Shortcuts > Mission Control). Nothing else moves windows
-//! between Spaces or switches Spaces with SIP enabled on recent macOS.
+//! Keyboard Shortcuts > Mission Control), for when doing it at once does not
+//! work.
 //!
 //! A window is carried by doing what a person would: hold it by its title
 //! bar and press the shortcut.

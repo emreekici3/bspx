@@ -56,6 +56,10 @@ const HEAD_INSERT_EVENT_TAP: u32 = 0;
 const TAP_OPTION_DEFAULT: u32 = 0;
 const TAP_OPTION_LISTEN_ONLY: u32 = 1;
 
+/// `kCGEventSourceUserData`, marking the swipes cberry makes itself.
+pub const SOURCE_DATA_FIELD: u32 = 42;
+pub const OWN_SWIPE: i64 = 0x6362;
+
 /// `NSEventTypeGesture` and the Dock's own: how trackpad swipes arrive.
 const GESTURE: u32 = 29;
 const DOCK_CONTROL: u32 = 30;
@@ -191,6 +195,7 @@ unsafe extern "C" fn swipe_callback(
                 unsafe { CGEventTapEnable(tap, true) };
             }
         }
+        _ if unsafe { CGEventGetIntegerValueField(event, SOURCE_DATA_FIELD) } == OWN_SWIPE => {}
         _ if unsafe { CGEventGetIntegerValueField(event, GESTURE_KIND_FIELD) } == DOCK_SWIPE => {
             let phase = unsafe { CGEventGetIntegerValueField(event, GESTURE_PHASE_FIELD) };
             if phase != 0 {

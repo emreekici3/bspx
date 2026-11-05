@@ -14,8 +14,8 @@ impl Rect {
         Self { x, y, w, h }
     }
 
-    /// The part of this rect a grid cell covers: `[rows, cols, x, y, w, h]`,
-    /// as in yabai's `grid=`. Edges are rounded so neighbouring cells meet.
+    /// The part of this rect a grid cell covers: `[rows, cols, x, y, w, h]`.
+    /// Edges are rounded so neighbouring cells meet.
     pub fn grid_cell(&self, [rows, cols, x, y, w, h]: [u32; 6]) -> Rect {
         let cols = cols.max(1) as i64;
         let rows = rows.max(1) as i64;

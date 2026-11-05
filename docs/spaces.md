@@ -33,7 +33,13 @@ cberry bind 'alt - left : cberry space prev'
 cberry bind 'shift + alt - right : cberry send next'
 ```
 
-These use the macOS *Switch to Desktop N* shortcuts, so turn them on first: *System Settings → Keyboard → Keyboard Shortcuts → Mission Control*. With SIP enabled, recent macOS only lets a window change Spaces the way a person does it, so cranberry holds the window by its title bar and switches Spaces: you go along with it. A Space rule does the same to a new window; `cberry config rule_carry off` leaves the pointer alone, and the window stays on the current Space.
+Spaces switch and windows move at once, with SIP enabled. To go along with a window, follow it; it keeps the focus:
+
+```sh
+cberry bind 'shift + alt - 1 : cberry send 1 && cberry space 1'
+```
+
+Turn on the macOS *Switch to Desktop N* shortcuts too, in *System Settings → Keyboard → Keyboard Shortcuts → Mission Control*. cranberry uses them when a switch at once cannot work, as in Mission Control. If a window cannot be moved at once, cranberry holds it by its title bar and switches Spaces: you go along with it. `cberry config rule_carry off` keeps Space rules from doing this to a new window; it stays on the current Space.
 
 ## Displays
 

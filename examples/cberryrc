@@ -54,7 +54,7 @@ cberry rule float "Archive Utility"
 # cberry rule space web "Safari"
 # Apps whose new windows float at a place of their own: split the screen
 # into rows:cols cells and take w x h of them from column x, row y
-# (counted from 0), as in yabai's grid=.
+# (counted from 0).
 # cberry rule grid 4:4:3:0:1:1 "Calculator"   # top right corner
 # cberry rule grid 1:2:1:0:1:1 "Spotify"      # right half
 # cberry rule grid 6:6:1:1:4:4 "Finder"       # centred, two thirds

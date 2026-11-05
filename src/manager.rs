@@ -77,6 +77,12 @@ pub struct Manager<B: Backend> {
     /// The window focused before the system's focus last moved, and when
     /// (`clock`): see `split_target`.
     focus_moved: Option<(WinId, f64)>,
+    /// The window last sent to another Space, the Space, and when: going
+    /// after it right away is meant to find it in focus.
+    sent: Option<(WinId, u64, std::time::Instant)>,
+    /// A window that must end up focused, until when, and when to try next:
+    /// macOS hands focus around for a moment after a Space switch.
+    holding_focus: Option<(WinId, std::time::Instant, std::time::Instant)>,
     /// The window `cberry zoom` grew over the others on this Space, if any.
     zoomed: Option<(WinId, Zoom)>,
     area: Rect,
@@ -159,6 +165,12 @@ struct Grab {
 /// seconds, so crossing windows on the way somewhere does not focus them.
 const FOCUS_FOLLOWS_MOUSE_DELAY: f64 = 0.1;
 
+/// How soon after a window is sent to a Space going there brings it focus.
+const FOLLOW_SENT: std::time::Duration = std::time::Duration::from_secs(2);
+/// How long after that the window is kept in focus, and how often it is looked at.
+const HOLD_FOCUS: std::time::Duration = std::time::Duration::from_millis(500);
+const HOLD_FOCUS_RETRY: std::time::Duration = std::time::Duration::from_millis(30);
+
 /// The smallest a window can be resized to by a mouse gesture.
 const MIN_GESTURE_SIZE: i32 = 50;
 
@@ -213,6 +225,8 @@ impl<B: Backend> Manager<B> {
             previous_space: None,
             reported_focus: None,
             focus_moved: None,
+            sent: None,
+            holding_focus: None,
             zoomed: None,
             area: Rect::default(),
             mouse_was_down: false,
@@ -1383,8 +1397,26 @@ impl<B: Backend> Manager<B> {
 
     /// Lets the platform UI process its events; call once per frame.
     pub fn pump(&mut self) {
+        self.hold_focus();
         self.update_border();
         self.backend.pump();
+    }
+
+    /// Takes focus back for the window it belongs to, for as long as macOS
+    /// may still hand it elsewhere.
+    fn hold_focus(&mut self) {
+        let Some((win, until, next)) = self.holding_focus else {
+            return;
+        };
+        let now = std::time::Instant::now();
+        if now >= until {
+            self.holding_focus = None;
+        } else if now >= next {
+            self.holding_focus = Some((win, until, now + HOLD_FOCUS_RETRY));
+            if self.backend.focused_window() != Some(win) {
+                self.backend.focus(win);
+            }
+        }
     }
 
     /// Where the ring goes this frame: around the focused window, wherever
@@ -2440,6 +2472,7 @@ impl<B: Backend> Manager<B> {
                     return Err(format!("macOS would not move the window to Space {n}"));
                 }
                 info!("window {win} sent to Space {n}");
+                self.sent = Some((win, sid, std::time::Instant::now()));
                 // Its neighbours fill the gap; it joins that Space's layout.
                 self.refresh();
                 if self.active_space == sid {
@@ -2477,6 +2510,16 @@ impl<B: Backend> Manager<B> {
                 let (_, sid) = self.resolve_space(space)?;
                 if sid != self.current_space() {
                     self.backend.show_space(sid)?;
+                }
+                if let Some((win, _, _)) = self
+                    .sent
+                    .take()
+                    .filter(|(_, to, at)| *to == sid && at.elapsed() < FOLLOW_SENT)
+                {
+                    self.focused = Some(win);
+                    self.backend.focus(win);
+                    let now = std::time::Instant::now();
+                    self.holding_focus = Some((win, now + HOLD_FOCUS, now + HOLD_FOCUS_RETRY));
                 }
                 return Ok(String::new());
             }
@@ -4398,6 +4441,32 @@ pub(crate) mod tests {
         m.refresh();
         m.execute(&Command::parse("send 2").unwrap()).unwrap();
         assert_eq!(m.backend().space_of[&2], 21);
+    }
+
+    #[test]
+    fn going_after_a_sent_window_focuses_it() {
+        let mut m = two_displays();
+        m.backend.display_spaces = vec![vec![10, 11], vec![20, 21, 22]];
+        open_on(&mut m, 1, 10);
+        open_on(&mut m, 2, 20);
+        m.backend.focused = Some(2);
+        m.refresh();
+        m.execute(&Command::parse("send 2").unwrap()).unwrap();
+        m.backend.focused = None;
+        m.backend.focus_calls.clear();
+        m.execute(&Command::parse("space 2").unwrap()).unwrap();
+        assert_eq!(m.backend().focus_calls, [2]);
+        // macOS hands focus elsewhere: it is taken back.
+        m.backend.focused = Some(1);
+        m.backend.focus_calls.clear();
+        std::thread::sleep(HOLD_FOCUS_RETRY);
+        m.pump();
+        assert_eq!(m.backend().focus_calls, [2]);
+        // Only for a moment, and only that once.
+        m.holding_focus = None;
+        m.backend.focus_calls.clear();
+        m.execute(&Command::parse("space 2").unwrap()).unwrap();
+        assert!(m.backend().focus_calls.is_empty());
     }
 
     #[test]
