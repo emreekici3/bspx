@@ -65,8 +65,9 @@ pub struct Manager<B: Backend> {
     shown_border: Option<Border>,
     /// The ring is following a window the user holds by its title bar.
     border_tracking: bool,
-    /// That window, and where the window server had it at the press.
-    border_press: Option<(WinId, Rect)>,
+    /// That window at the press: its frame by the window server, and the
+    /// one the ring knew.
+    border_press: Option<(WinId, Rect, Rect)>,
     /// The drop highlight on screen, if any.
     shown_overlay: Option<Overlay>,
     /// The Space shown before the current one, for `space recent`.
@@ -1404,13 +1405,15 @@ impl<B: Backend> Manager<B> {
         // The window server's idea of a frame can differ a little from the
         // one the window was last seen at, so only what changed since the
         // press counts: a click moves nothing.
-        let start = match (live, self.border_press) {
-            (Some(_), Some((win, start))) if win == id => Some(start),
-            _ => live,
+        // `frames` catches up during a drag, so all counts from the press.
+        let press = match (live, self.border_press) {
+            (Some(_), Some(press)) if press.0 == id => Some(press),
+            (Some(now), _) => Some((id, now, frame)),
+            _ => None,
         };
-        self.border_press = live.zip(start).map(|(_, start)| (id, start));
-        let rect = match live.zip(start) {
-            Some((now, start)) => Rect::new(
+        self.border_press = press;
+        let rect = match live.zip(press) {
+            Some((now, (_, start, frame))) => Rect::new(
                 frame.x + now.x - start.x,
                 frame.y + now.y - start.y,
                 frame.w + now.w - start.w,
@@ -5614,10 +5617,13 @@ pub(crate) mod tests {
             .server_frames
             .insert(2, Rect::new(70, 45, 300, 200));
         m.pump();
-        assert_eq!(
-            m.backend().border.unwrap().rect,
-            Rect::new(frame.x + 30, frame.y - 5, frame.w, frame.h)
-        );
+        let moved = Rect::new(frame.x + 30, frame.y - 5, frame.w, frame.h);
+        assert_eq!(m.backend().border.unwrap().rect, moved);
+        // A look at the windows mid-drag does not count the move twice.
+        m.frames.insert(2, moved);
+        m.pump();
+        assert_eq!(m.backend().border.unwrap().rect, moved);
+        m.frames.insert(2, frame);
         m.backend.mouse = false;
         m.pump();
         assert!(!m.is_held());

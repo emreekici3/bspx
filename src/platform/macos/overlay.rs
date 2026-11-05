@@ -1,13 +1,13 @@
-//! The drop-target highlight: a borderless, click-through AppKit window with
-//! a rounded, translucent layer, stacked just above the target window (and
-//! so below the window being dragged, which is frontmost).
+//! The drop-target highlight and the ring around the focused window:
+//! borderless, click-through AppKit windows with a rounded layer, above
+//! every normal window. macOS does not reliably stack them right above a
+//! window of another app: they would end up behind it.
 
 use std::ffi::c_void;
 use std::ptr;
 use std::sync::Once;
 
 use super::ffi::*;
-use crate::bsp::WinId;
 use crate::geometry::Rect;
 
 /// `objc_msgSend` cast to the method's real signature.
@@ -40,8 +40,7 @@ const COLLECTION_BEHAVIOR: usize = (1 << 0) | (1 << 4) | (1 << 6) | (1 << 8);
 /// window, and Mission Control hides it.
 const RING_BEHAVIOR: usize = (1 << 1) | (1 << 3) | (1 << 6) | (1 << 8);
 /// `NSFloatingWindowLevel`: above every normal window, so that no click can
-/// raise a window, or its shadow, over the ring. It is the focused window's,
-/// and that one is in front of the others anyway.
+/// raise a window, or its shadow, over these.
 const NS_FLOATING_WINDOW_LEVEL: isize = 3;
 const CORNER_RADIUS: f64 = 10.0;
 const BORDER_WIDTH: f64 = 2.0;
@@ -64,9 +63,7 @@ impl OverlayWindow {
 
     /// The ring around the focused window.
     pub fn ring() -> Option<Self> {
-        let ring = Self::with_behavior(RING_BEHAVIOR)?;
-        unsafe { msg!(ring.window, "setLevel:", NS_FLOATING_WINDOW_LEVEL => isize) };
-        Some(ring)
+        Self::with_behavior(RING_BEHAVIOR)
     }
 
     fn with_behavior(behavior: usize) -> Option<Self> {
@@ -97,6 +94,7 @@ impl OverlayWindow {
             let clear: Id = msg!(class(c"NSColor"), "clearColor"; -> Id);
             msg!(window, "setBackgroundColor:", clear => Id);
             msg!(window, "setCollectionBehavior:", behavior => usize);
+            msg!(window, "setLevel:", NS_FLOATING_WINDOW_LEVEL => isize);
             msg!(window, "setAnimationBehavior:", NS_WINDOW_ANIMATION_BEHAVIOR_NONE => isize);
 
             let view: Id = msg!(window, "contentView"; -> Id);
@@ -118,9 +116,8 @@ impl OverlayWindow {
         }
     }
 
-    /// Shows the highlight over `rect` (top-left global coordinates), just
-    /// above window `above`.
-    pub fn show(&mut self, rect: Rect, above: WinId, color: [f32; 4]) {
+    /// Shows the highlight over `rect` (top-left global coordinates).
+    pub fn show(&mut self, rect: Rect, color: [f32; 4]) {
         unsafe {
             let catx = class(c"CATransaction");
             msg!(catx, "begin");
@@ -136,7 +133,7 @@ impl OverlayWindow {
                 self.color = Some(color);
             }
             msg!(catx, "commit");
-            self.place(rect, above);
+            self.place(rect);
         }
     }
 
@@ -166,12 +163,12 @@ impl OverlayWindow {
                 self.ring = Some(ring);
             }
             msg!(catx, "commit");
-            self.place(outer, 0);
+            self.place(outer);
         }
     }
 
-    /// Puts the window over `rect`, just above window `above`.
-    unsafe fn place(&mut self, rect: Rect, above: WinId) {
+    /// Puts the window over `rect`, in front of its level.
+    unsafe fn place(&mut self, rect: Rect) {
         unsafe {
             let catx = class(c"CATransaction");
             // Cocoa puts the origin at the bottom-left of the primary display.
@@ -187,7 +184,7 @@ impl OverlayWindow {
                 },
             };
             msg!(self.window, "setFrame:display:", frame => CGRect, YES => i8);
-            msg!(self.window, "orderWindow:relativeTo:", NS_WINDOW_ABOVE => isize, above as isize => isize);
+            msg!(self.window, "orderWindow:relativeTo:", NS_WINDOW_ABOVE => isize, 0 => isize);
             msg!(catx, "flush");
         }
         self.visible = true;

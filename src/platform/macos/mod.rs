@@ -1617,7 +1617,7 @@ impl Backend for MacBackend {
                     }
                 }
                 if let Some(w) = &mut self.overlay {
-                    w.show(o.rect, o.above, o.color);
+                    w.show(o.rect, o.color);
                 }
             }
             None => {
