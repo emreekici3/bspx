@@ -1391,7 +1391,8 @@ impl<B: Backend> Manager<B> {
     /// that is, moving with it.
     fn wanted_border(&mut self) -> Option<Border> {
         self.border_tracking = false;
-        if !self.config.border {
+        // Its window slides away with the Space; the ring would not.
+        if !self.config.border || self.backend.space_swiping() {
             return None;
         }
         let id = self
@@ -2357,6 +2358,7 @@ impl<B: Backend> Manager<B> {
             }
             Command::Query => return Ok(self.describe()),
             Command::QueryJson => return Ok(self.describe_json()),
+            Command::QuerySpaces => return Ok(self.describe_spaces()),
             Command::DaemonVersion => return Ok(format!("{}\n", env!("CARGO_PKG_VERSION"))),
             Command::Bind(None) => {
                 let mut out = String::new();
@@ -2509,6 +2511,39 @@ impl<B: Backend> Manager<B> {
         format!("[{}]\n", windows.join(","))
     }
 
+    /// The Spaces of the current display as a JSON array, in Mission Control
+    /// order. `windows` counts the tiled ones.
+    fn describe_spaces(&mut self) -> String {
+        let current = self.current_space();
+        let float_spaces = self.float_space_ids();
+        let spaces: Vec<String> = self
+            .backend
+            .display_spaces(current)
+            .into_iter()
+            .enumerate()
+            .map(|(i, id)| {
+                let index = i + 1;
+                let label = self
+                    .config
+                    .labels
+                    .get(&index)
+                    .map_or("null".to_string(), |l| json_string(l));
+                let windows = if id == self.active_space {
+                    self.tree.windows().len()
+                } else {
+                    self.spaces.get(&id).map_or(0, |s| s.tree.windows().len())
+                };
+                format!(
+                    "{{\"index\":{index},\"label\":{label},\"focused\":{},\"float\":{},\
+                     \"windows\":{windows}}}",
+                    id == current,
+                    float_spaces.contains(&id)
+                )
+            })
+            .collect();
+        format!("[{}]\n", spaces.join(","))
+    }
+
     /// `zoomed`, `tiled` or `floating`.
     fn window_state(&self, id: WinId) -> &'static str {
         if self.zoomed.is_some_and(|(w, _)| w == id) {
@@ -2656,6 +2691,7 @@ pub(crate) mod tests {
         pub carries: bool,
         pub border: Option<Border>,
         pub border_calls: usize,
+        pub swiping: bool,
         pub server_frames: HashMap<WinId, Rect>,
     }
 
@@ -2817,6 +2853,9 @@ pub(crate) mod tests {
         }
         fn server_frame(&mut self, id: WinId) -> Option<Rect> {
             self.server_frames.get(&id).copied()
+        }
+        fn space_swiping(&mut self) -> bool {
+            self.swiping
         }
         fn show_border(&mut self, border: Option<Border>) {
             self.border = border;
@@ -5703,5 +5742,33 @@ pub(crate) mod tests {
         assert_eq!(m.backend().frame(1), Rect::new(0, 25, 1000, 600));
         run(&mut m, "zoom").unwrap();
         assert_eq!(m.backend().frame(1), cell);
+    }
+
+    #[test]
+    fn query_spaces_lists_the_spaces_of_the_display() {
+        let mut m = three_spaces();
+        m.backend.open(1, "Terminal");
+        m.refresh();
+        assert_eq!(
+            run(&mut m, "query --spaces").unwrap(),
+            "[{\"index\":1,\"label\":\"general\",\"focused\":true,\"float\":false,\
+             \"windows\":1},\
+             {\"index\":2,\"label\":\"web\",\"focused\":false,\"float\":false,\
+             \"windows\":0},\
+             {\"index\":3,\"label\":\"coding\",\"focused\":false,\"float\":false,\
+             \"windows\":0}]\n"
+        );
+    }
+
+    #[test]
+    fn the_border_hides_while_fingers_switch_spaces() {
+        let mut m = bordered();
+        assert!(m.backend().border.is_some());
+        m.backend.swiping = true;
+        m.pump();
+        assert_eq!(m.backend().border, None);
+        m.backend.swiping = false;
+        m.pump();
+        assert!(m.backend().border.is_some());
     }
 }

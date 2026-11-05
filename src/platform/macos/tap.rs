@@ -8,8 +8,9 @@
 
 use std::ffi::c_void;
 use std::ptr;
-use std::sync::Once;
-use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU64, Ordering::Relaxed};
+use std::sync::{Once, OnceLock};
+use std::time::{Duration, Instant};
 
 use log::{info, warn};
 
@@ -36,6 +37,7 @@ unsafe extern "C" {
     fn CGEventGetFlags(event: CFTypeRef) -> u64;
     fn CGEventGetLocation(event: CFTypeRef) -> CGPoint;
     fn CGEventSourceFlagsState(state: i32) -> u64;
+    fn CGEventGetIntegerValueField(event: CFTypeRef, field: u32) -> i64;
 }
 
 #[cfg_attr(target_os = "macos", link(name = "CoreFoundation", kind = "framework"))]
@@ -52,6 +54,28 @@ unsafe extern "C" {
 const SESSION_EVENT_TAP: u32 = 1;
 const HEAD_INSERT_EVENT_TAP: u32 = 0;
 const TAP_OPTION_DEFAULT: u32 = 0;
+const TAP_OPTION_LISTEN_ONLY: u32 = 1;
+
+/// `NSEventTypeGesture` and the Dock's own: how trackpad swipes arrive.
+const GESTURE: u32 = 29;
+const DOCK_CONTROL: u32 = 30;
+/// The event field with the kind of gesture.
+const GESTURE_KIND_FIELD: u32 = 110;
+/// `kIOHIDEventTypeDockSwipe`: fingers switching Spaces or opening Mission
+/// Control.
+const DOCK_SWIPE: i64 = 23;
+/// The event field with the gesture's phase, an `IOHIDEventPhaseBits`.
+const GESTURE_PHASE_FIELD: u32 = 132;
+const PHASE_ENDED: i64 = 4;
+const PHASE_CANCELLED: i64 = 8;
+/// A swipe is over this long after its last event: it also covers the Spaces
+/// settling.
+const SWIPE_SETTLE: Duration = Duration::from_millis(400);
+/// How long after a swipe the Spaces are watched for still sliding.
+const SWIPE_AFTERMATH: Duration = Duration::from_secs(3);
+/// Fingers held still send no events, so a swipe lasts until it ends. This
+/// long without one, its end was missed.
+const SWIPE_HELD: Duration = Duration::from_secs(10);
 
 const LEFT_MOUSE_DOWN: u32 = 1;
 const LEFT_MOUSE_UP: u32 = 2;
@@ -78,6 +102,12 @@ static LATCHED: AtomicU8 = AtomicU8::new(0);
 /// report the pointer moving while they are.
 static LOCATION: AtomicU64 = AtomicU64::new(0);
 static TAP: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
+static SWIPE_TAP: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
+static EPOCH: OnceLock<Instant> = OnceLock::new();
+/// When the last Dock swipe event came, in milliseconds from `EPOCH`.
+static LAST_SWIPE: AtomicU64 = AtomicU64::new(0);
+/// Whether a swipe has begun and not ended.
+static FINGERS_DOWN: AtomicBool = AtomicBool::new(false);
 static START: Once = Once::new();
 
 fn flag(modifier: Modifier) -> u64 {
@@ -120,6 +150,57 @@ pub fn held(modifier: Modifier) -> bool {
 pub fn any_held() -> bool {
     use Modifier::{Alt, Cmd, Ctrl, Fn, Shift};
     [Alt, Cmd, Ctrl, Fn, Shift].into_iter().any(held)
+}
+
+fn millis() -> u64 {
+    EPOCH.get_or_init(Instant::now).elapsed().as_millis() as u64
+}
+
+/// Whether fingers are switching Spaces, or just did.
+pub fn swiping() -> bool {
+    let last = LAST_SWIPE.load(Relaxed);
+    if last == 0 {
+        return false;
+    }
+    let age = millis().saturating_sub(last);
+    let lasting = if FINGERS_DOWN.load(Relaxed) {
+        SWIPE_HELD
+    } else {
+        SWIPE_SETTLE
+    };
+    age < lasting.as_millis() as u64
+}
+
+/// Whether a swipe was seen not long ago, so what it set off may still run.
+pub fn swiped_lately() -> bool {
+    let last = LAST_SWIPE.load(Relaxed);
+    last != 0 && millis().saturating_sub(last) < SWIPE_AFTERMATH.as_millis() as u64
+}
+
+/// Notes Dock swipes. It only listens, so a swipe never waits for it.
+unsafe extern "C" fn swipe_callback(
+    _proxy: *mut c_void,
+    kind: u32,
+    event: CFTypeRef,
+    _user_info: *mut c_void,
+) -> CFTypeRef {
+    match kind {
+        TAP_DISABLED_BY_TIMEOUT | TAP_DISABLED_BY_USER_INPUT => {
+            let tap = SWIPE_TAP.load(Relaxed);
+            if !tap.is_null() {
+                unsafe { CGEventTapEnable(tap, true) };
+            }
+        }
+        _ if unsafe { CGEventGetIntegerValueField(event, GESTURE_KIND_FIELD) } == DOCK_SWIPE => {
+            let phase = unsafe { CGEventGetIntegerValueField(event, GESTURE_PHASE_FIELD) };
+            if phase != 0 {
+                FINGERS_DOWN.store(phase & (PHASE_ENDED | PHASE_CANCELLED) == 0, Relaxed);
+            }
+            LAST_SWIPE.store(millis().max(1), Relaxed);
+        }
+        _ => {}
+    }
+    event
 }
 
 pub fn gesture() -> Option<MouseButton> {
@@ -180,6 +261,22 @@ fn start() {
             CFRunLoopAddSource(CFRunLoopGetCurrent(), source, kCFRunLoopCommonModes);
             CGEventTapEnable(tap, true);
             info!("mouse gestures enabled");
+            let swipes = CGEventTapCreate(
+                SESSION_EVENT_TAP,
+                HEAD_INSERT_EVENT_TAP,
+                TAP_OPTION_LISTEN_ONLY,
+                (1 << GESTURE) | (1 << DOCK_CONTROL),
+                swipe_callback,
+                ptr::null_mut(),
+            );
+            if swipes.is_null() {
+                warn!("cannot watch for Space swipes");
+            } else {
+                SWIPE_TAP.store(swipes.cast_mut(), Relaxed);
+                let source = CFMachPortCreateRunLoopSource(ptr::null(), swipes, 0);
+                CFRunLoopAddSource(CFRunLoopGetCurrent(), source, kCFRunLoopCommonModes);
+                CGEventTapEnable(swipes, true);
+            }
             // Once Accessibility is taken away, macOS keeps routing mouse
             // events through a tap that can no longer answer, and the mouse
             // freezes. So keep checking, and get out of the way at once.
@@ -188,6 +285,7 @@ fn start() {
             }
             CGEventTapEnable(tap, false);
             TAP.store(ptr::null_mut(), Relaxed);
+            SWIPE_TAP.store(ptr::null_mut(), Relaxed);
             CFMachPortInvalidate(tap);
             warn!("accessibility permission was removed; restarting");
             // launchd starts cberry again, which then waits for the permission.

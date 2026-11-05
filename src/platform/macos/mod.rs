@@ -766,6 +766,18 @@ impl MacBackend {
     }
 }
 
+/// Whether the main display's Spaces are still sliding. A swipe let go of
+/// halfway takes its time going back, however it ended.
+fn spaces_sliding(connection: i32) -> bool {
+    type IsAnimating = unsafe extern "C" fn(i32, CFStringRef) -> bool;
+    static CALL: std::sync::OnceLock<Option<IsAnimating>> = std::sync::OnceLock::new();
+    let call = CALL.get_or_init(|| unsafe { lookup(c"SLSManagedDisplayIsAnimating") });
+    match (call, main_display_uuid()) {
+        (Some(call), Some(uuid)) => unsafe { call(connection, uuid.ptr()) },
+        _ => false,
+    }
+}
+
 /// The main display's UUID, as the Space functions name displays.
 fn main_display_uuid() -> Option<Cf> {
     display_uuid(unsafe { CGMainDisplayID() })
@@ -1626,6 +1638,10 @@ impl Backend for MacBackend {
                 }
             }
         }
+    }
+
+    fn space_swiping(&mut self) -> bool {
+        tap::swiping() || (tap::swiped_lately() && spaces_sliding(self.connection))
     }
 
     fn show_border(&mut self, border: Option<Border>) {

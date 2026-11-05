@@ -138,6 +138,10 @@ pub trait Backend {
     /// Shows the drop-target highlight over `rect`, placed just above window
     /// `above`, or hides it with `None`.
     fn show_overlay(&mut self, _overlay: Option<Overlay>) {}
+    /// Whether fingers are switching Spaces right now.
+    fn space_swiping(&mut self) -> bool {
+        false
+    }
     /// Shows the ring around the focused window, or hides it with `None`.
     fn show_border(&mut self, _border: Option<Border>) {}
     /// Lets the platform UI (the overlay window) process its events. Called

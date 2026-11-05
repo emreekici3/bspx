@@ -183,6 +183,13 @@ impl OverlayWindow {
                     height: f64::from(rect.h),
                 },
             };
+            // AppKit skips a frame it believes the window has, and a Space
+            // sliding by can leave the window server with another.
+            if !self.visible {
+                let mut other = frame;
+                other.size.width += 1.0;
+                msg!(self.window, "setFrame:display:", other => CGRect, NO => i8);
+            }
             msg!(self.window, "setFrame:display:", frame => CGRect, YES => i8);
             msg!(self.window, "orderWindow:relativeTo:", NS_WINDOW_ABOVE => isize, 0 => isize);
             msg!(catx, "flush");

@@ -58,7 +58,7 @@
 | `cberry reload` | Reload the config |
 | `cberry config <key> [value]` | Show or change a setting |
 | `cberry bind ['<hotkey>']` | Add a keyboard shortcut; alone, list them |
-| `cberry query [--json]` | List windows with their app names |
+| `cberry query [--json\|--spaces]` | List windows with their app names, or the Spaces as JSON |
 | `cberry doctor` | Check the setup and say what to fix |
 | `cberry version` | Print the version |
 

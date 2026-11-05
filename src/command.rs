@@ -89,6 +89,8 @@ pub enum Command {
     Query,
     /// List managed windows as JSON.
     QueryJson,
+    /// List the Spaces of the current display as JSON.
+    QuerySpaces,
     /// The version of the running window manager.
     DaemonVersion,
     /// Stop the window manager.
@@ -114,7 +116,7 @@ commands:
   send <space>                             move the focused window to a Space, also next,
                                            prev or recent
   send-display <next|prev|n>               move the focused window to another display
-  query [--json]                           list windows
+  query [--json|--spaces]                  list windows, or the Spaces as JSON
   retile | reload | quit
 
 settings (put these in ~/.config/cranberry/cberryrc):
@@ -197,6 +199,7 @@ impl Command {
             Some("query") => match words.get(1).copied() {
                 None => Command::Query,
                 Some("--json") => Command::QueryJson,
+                Some("--spaces") => Command::QuerySpaces,
                 Some(other) => return Err(format!("query: unknown option '{other}'")),
             },
             Some("daemon-version") => no_args(Command::DaemonVersion)?,
@@ -337,6 +340,7 @@ impl Command {
             | Command::Grid(_)
             | Command::ToggleFloatAt(_)
             | Command::QueryJson
+            | Command::QuerySpaces
             | Command::Send(_)
             | Command::SendDisplay(_)
             | Command::Space(_) => 2,
@@ -564,6 +568,7 @@ mod tests {
     fn query_can_ask_for_json() {
         assert_eq!(Command::parse("query"), Ok(Command::Query));
         assert_eq!(Command::parse("query --json"), Ok(Command::QueryJson));
+        assert_eq!(Command::parse("query --spaces"), Ok(Command::QuerySpaces));
         assert!(Command::parse("query --xml").is_err());
     }
 
