@@ -41,6 +41,17 @@ cberry bind 'shift + alt - 1 : cberry send 1 && cberry space 1'
 
 Turn on the macOS *Switch to Desktop N* shortcuts too, in *System Settings → Keyboard → Keyboard Shortcuts → Mission Control*. cranberry uses them when a switch at once cannot work, as in Mission Control. If a window cannot be moved at once, cranberry holds it by its title bar and switches Spaces: you go along with it. `cberry config rule_carry off` keeps Space rules from doing this to a new window; it stays on the current Space.
 
+## Scratchpads
+
+A scratchpad is an app at hand on every Space. Name it and bind a key, in `cberryrc`:
+
+```sh
+cberry scratchpad term "kitty"
+cberry bind 'alt - s : cberry scratchpad toggle term'
+```
+
+The key brings its window to the current Space, floating in the middle and in focus, and starts the app if it is not running. Pressed again it hides the app, and focus goes back. Leaving the Space hides it too. Its windows are never tiled, so choose an app you keep for this.
+
 ## Displays
 
 Each display has a layout of its own; a new window splits the window last focused on its display. Commands act on the display of the focused window.

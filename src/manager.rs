@@ -83,6 +83,17 @@ pub struct Manager<B: Backend> {
     /// A window that must end up focused, until when, and when to try next:
     /// macOS hands focus around for a moment after a Space switch.
     holding_focus: Option<(WinId, std::time::Instant, std::time::Instant)>,
+    /// The scratchpad being started: its window is shown when it appears.
+    scratch_starting: Option<String>,
+    /// The window of each scratchpad.
+    scratch_windows: HashMap<String, WinId>,
+    /// The Spaces on screen when scratchpads were last looked at.
+    scratch_spaces: Vec<u64>,
+    /// A scratchpad left behind, to hide once it no longer has focus, or at
+    /// the time given.
+    scratch_closing: Option<(WinId, std::time::Instant)>,
+    /// What had focus before a scratchpad took it.
+    scratch_before: Option<WinId>,
     /// The window `cberry zoom` grew over the others on this Space, if any.
     zoomed: Option<(WinId, Zoom)>,
     area: Rect,
@@ -170,6 +181,8 @@ const FOLLOW_SENT: std::time::Duration = std::time::Duration::from_secs(2);
 /// How long after that the window is kept in focus, and how often it is looked at.
 const HOLD_FOCUS: std::time::Duration = std::time::Duration::from_millis(500);
 const HOLD_FOCUS_RETRY: std::time::Duration = std::time::Duration::from_millis(30);
+/// The most a scratchpad left behind waits for focus to go elsewhere.
+const SCRATCH_CLOSE_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// The smallest a window can be resized to by a mouse gesture.
 const MIN_GESTURE_SIZE: i32 = 50;
@@ -227,6 +240,11 @@ impl<B: Backend> Manager<B> {
             focus_moved: None,
             sent: None,
             holding_focus: None,
+            scratch_starting: None,
+            scratch_windows: HashMap::new(),
+            scratch_spaces: Vec::new(),
+            scratch_closing: None,
+            scratch_before: None,
             zoomed: None,
             area: Rect::default(),
             mouse_was_down: false,
@@ -550,6 +568,7 @@ impl<B: Backend> Manager<B> {
             .map(|w| w.id)
             .collect();
         self.movable = windows.iter().filter(|w| w.movable).map(|w| w.id).collect();
+        self.close_scratchpads_left_behind(&shown);
         let mut new = Vec::new();
         for info in windows {
             if !self.mover.in_motion(info.id) {
@@ -566,7 +585,7 @@ impl<B: Backend> Manager<B> {
                 // A grid rule floats the window at its cell (a fixed-size
                 // one too); a Space rule then may still send it away (it
                 // keeps its place there).
-                let placed = self.place_by_grid(&info);
+                let placed = self.show_started_scratchpad(&info) || self.place_by_grid(&info);
                 if placed || info.tileable {
                     self.seen.insert(info.id);
                 }
@@ -579,6 +598,7 @@ impl<B: Backend> Manager<B> {
                 && on.is_some_and(|s| shown.contains(&s) && !float_spaces.contains(&s))
                 && !self.floating.contains(&info.id)
                 && !self.closed.contains(&info.id)
+                && !self.is_scratchpad_app(&info.app)
                 && !self
                     .config
                     .float_apps
@@ -817,6 +837,136 @@ impl<B: Backend> Manager<B> {
         self.frames.insert(id, frame);
         info!("window {id} of {app} floats at grid {grid:?}: {frame:?}");
         true
+    }
+
+    fn is_scratchpad_app(&self, app: &str) -> bool {
+        self.config
+            .scratchpads
+            .iter()
+            .any(|(_, a, _)| app_matches(a, app))
+    }
+
+    /// Shows a window of a scratchpad just started. Returns whether it was
+    /// one.
+    fn show_started_scratchpad(&mut self, info: &WindowInfo) -> bool {
+        let Some(name) = self.scratch_starting.clone() else {
+            return false;
+        };
+        let Some((_, _, grid)) = self
+            .config
+            .scratchpads
+            .iter()
+            .find(|(n, a, _)| *n == name && app_matches(a, &info.app))
+            .cloned()
+        else {
+            return false;
+        };
+        self.scratch_starting = None;
+        self.scratch_windows.insert(name, info.id);
+        self.frames.insert(info.id, info.frame);
+        self.show_scratchpad(info.id, grid);
+        true
+    }
+
+    /// Brings a scratchpad's window here, floating at `grid`, in focus.
+    fn show_scratchpad(&mut self, win: WinId, grid: [u32; 6]) {
+        self.scratch_closing = None;
+        let focused = self.backend.focused_window().filter(|f| *f != win);
+        if focused.is_some() {
+            self.scratch_before = focused;
+        }
+        self.backend.set_app_hidden(win, false);
+        if self.tree.contains(win) {
+            self.remove_from_space(self.active_space, win);
+            self.relayout();
+        }
+        let here = self.current_space();
+        if self.backend.window_spaces(&[win]).get(&win) != Some(&here)
+            && !self.backend.place_on_space(win, here)
+        {
+            warn!("could not bring window {win} to this Space");
+        }
+        let frame = self.inner_area().grid_cell(grid);
+        let was = self.frames.get(&win).copied().unwrap_or(frame);
+        self.floating.insert(win);
+        self.mover.halt(win);
+        self.backend.update_frame(win, frame, was);
+        self.frames.insert(win, frame);
+        self.keep_focus(win);
+    }
+
+    /// A scratchpad is for the Space it was called to: after a switch, one
+    /// left behind goes away, however it came to be out. Call with `stack`
+    /// up to date.
+    fn close_scratchpads_left_behind(&mut self, shown: &[u64]) {
+        let first = self.scratch_spaces.is_empty();
+        if self.scratch_spaces == shown {
+            return;
+        }
+        self.scratch_spaces = shown.to_vec();
+        if first {
+            return;
+        }
+        for (name, app, _) in self.config.scratchpads.clone() {
+            if let Some(win) = self.scratchpad_window(&name, &app)
+                && !self.stack.contains(&win)
+            {
+                self.scratch_before = None;
+                // Focusing it again would bring it back.
+                self.holding_focus = self.holding_focus.filter(|(w, _, _)| *w != win);
+                // Hiding an app hands focus to the one before it, and macOS
+                // goes after that one, maybe back to where this was. So
+                // focus goes somewhere here first.
+                let here = self
+                    .focused
+                    .into_iter()
+                    .chain(self.tree.windows().into_iter().rev())
+                    .find(|w| *w != win && self.stack.contains(w));
+                if let Some(here) = here {
+                    self.focused = Some(here);
+                    self.backend.focus(here);
+                }
+                let by = std::time::Instant::now() + SCRATCH_CLOSE_WAIT;
+                self.scratch_closing = Some((win, by));
+            }
+        }
+    }
+
+    /// Hides a scratchpad left behind, when that takes no focus from it.
+    fn finish_closing_scratchpad(&mut self) {
+        let Some((win, by)) = self.scratch_closing else {
+            return;
+        };
+        if self.backend.focused_window() != Some(win) || std::time::Instant::now() >= by {
+            self.scratch_closing = None;
+            self.backend.set_app_hidden(win, true);
+        }
+    }
+
+    /// Puts a scratchpad's window out of sight, focus back where it was.
+    fn hide_scratchpad(&mut self, win: WinId) {
+        self.holding_focus = None;
+        let before = self.scratch_before.take();
+        if let Some(before) = before.filter(|b| self.stack.contains(b)) {
+            self.focused = Some(before);
+            self.backend.focus(before);
+        }
+        self.backend.set_app_hidden(win, true);
+    }
+
+    /// The window of the scratchpad running as `app`, if there is one.
+    fn scratchpad_window(&self, name: &str, app: &str) -> Option<WinId> {
+        let known = self.scratch_windows.get(name).copied();
+        known.filter(|w| self.apps.contains_key(w)).or_else(|| {
+            let mut windows: Vec<WinId> = self
+                .apps
+                .iter()
+                .filter(|(_, a)| app_matches(app, a))
+                .map(|(w, _)| *w)
+                .collect();
+            windows.sort_unstable();
+            windows.first().copied()
+        })
     }
 
     /// Sends a newly opened window to the Space its app's rule names.
@@ -1447,6 +1597,7 @@ impl<B: Backend> Manager<B> {
     /// Lets the platform UI process its events; call once per frame.
     pub fn pump(&mut self) {
         self.hold_focus();
+        self.finish_closing_scratchpad();
         self.update_border();
         self.backend.pump();
     }
@@ -2512,6 +2663,38 @@ impl<B: Backend> Manager<B> {
                 self.config.set_space_rule(app, space, follow);
                 return Ok(String::new());
             }
+            Command::Scratchpad {
+                ref name,
+                ref app,
+                grid,
+            } => {
+                self.config.set_scratchpad(name, app, grid);
+                return Ok(String::new());
+            }
+            Command::ScratchpadToggle(ref name) => {
+                let Some((_, app, grid)) = self
+                    .config
+                    .scratchpads
+                    .iter()
+                    .find(|(n, _, _)| n == name)
+                    .cloned()
+                else {
+                    return Err(format!("no scratchpad is called '{name}'"));
+                };
+                let Some(win) = self.scratchpad_window(name, &app) else {
+                    self.scratch_starting = Some(name.clone());
+                    self.scratch_before = self.backend.focused_window();
+                    self.backend.launch_app(&app)?;
+                    return Ok(String::new());
+                };
+                self.scratch_windows.insert(name.clone(), win);
+                if self.backend.focused_window() == Some(win) && self.stack.contains(&win) {
+                    self.hide_scratchpad(win);
+                } else {
+                    self.show_scratchpad(win, grid);
+                }
+                return Ok(String::new());
+            }
             Command::GridRule { grid, ref app } => {
                 self.config.set_grid_rule(app, grid);
                 return Ok(String::new());
@@ -2745,6 +2928,8 @@ pub(crate) mod tests {
         pub focused: Option<WinId>,
         pub area: Rect,
         pub focus_calls: Vec<WinId>,
+        pub hidden: Vec<(WinId, bool)>,
+        pub launched: Vec<String>,
         pub mouse: bool,
         pub cursor: (f32, f32),
         pub overlay: Option<Overlay>,
@@ -2976,6 +3161,16 @@ pub(crate) mod tests {
         fn focus(&mut self, id: WinId) {
             self.focus_calls.push(id);
             self.focused = Some(id);
+        }
+        fn set_app_hidden(&mut self, id: WinId, hidden: bool) {
+            self.hidden.push((id, hidden));
+            if hidden && self.focused == Some(id) {
+                self.focused = None;
+            }
+        }
+        fn launch_app(&mut self, app: &str) -> Result<(), String> {
+            self.launched.push(app.to_string());
+            Ok(())
         }
     }
 
@@ -4619,6 +4814,129 @@ pub(crate) mod tests {
         assert_eq!(m.backend().focused, Some(2));
         m.refresh();
         assert_eq!(m.tree().windows(), vec![2]);
+    }
+
+    fn with_scratchpad() -> Manager<MockBackend> {
+        let mut m = three_spaces();
+        run(&mut m, "scratchpad term kitty 4:4:0:0:2:2").unwrap();
+        m.backend.open(1, "Safari2");
+        m.refresh();
+        m
+    }
+
+    #[test]
+    fn a_scratchpad_starts_its_app_and_floats_in_focus() {
+        let mut m = with_scratchpad();
+        run(&mut m, "scratchpad toggle term").unwrap();
+        assert_eq!(m.backend().launched, ["kitty"]);
+        m.backend.open(2, "kitty");
+        m.refresh();
+        assert_eq!(m.tree().windows(), vec![1]);
+        assert_eq!(m.backend().focused, Some(2));
+        let cell = m.inner_area().grid_cell([4, 4, 0, 0, 2, 2]);
+        assert_eq!(m.backend().frame(2), cell);
+    }
+
+    #[test]
+    fn a_scratchpad_goes_away_and_comes_here() {
+        let mut m = with_scratchpad();
+        run(&mut m, "scratchpad toggle term").unwrap();
+        m.backend.open(2, "kitty");
+        m.refresh();
+        run(&mut m, "scratchpad toggle term").unwrap();
+        assert_eq!(m.backend().hidden.last(), Some(&(2, true)));
+        assert_eq!(m.backend().focused, Some(1));
+        // On another Space, it comes along.
+        m.backend.active = 30;
+        m.refresh();
+        run(&mut m, "scratchpad toggle term").unwrap();
+        assert_eq!(m.backend().space_of[&2], 30);
+        assert_eq!(m.backend().hidden.last(), Some(&(2, false)));
+        assert_eq!(m.backend().focused, Some(2));
+    }
+
+    #[test]
+    fn a_scratchpad_closes_when_the_space_changes() {
+        let mut m = with_scratchpad();
+        run(&mut m, "scratchpad toggle term").unwrap();
+        m.backend.open(2, "kitty");
+        m.refresh();
+        m.backend.hidden.clear();
+        m.refresh();
+        assert!(m.backend().hidden.is_empty());
+        m.backend.active = 20;
+        m.backend.focused = None;
+        m.refresh();
+        m.pump();
+        assert_eq!(m.backend().hidden, [(2, true)]);
+        m.refresh();
+        m.pump();
+        assert_eq!(m.backend().hidden.len(), 1);
+        // It comes back with the key.
+        run(&mut m, "scratchpad toggle term").unwrap();
+        assert_eq!(m.backend().space_of[&2], 20);
+        assert_eq!(m.backend().focused, Some(2));
+    }
+
+    #[test]
+    fn a_scratchpad_left_at_once_does_not_come_back() {
+        let mut m = with_scratchpad();
+        run(&mut m, "scratchpad toggle term").unwrap();
+        m.backend.open(2, "kitty");
+        m.refresh();
+        assert!(m.holding_focus.is_some());
+        m.backend.active = 20;
+        m.backend.focused = None;
+        m.refresh();
+        m.backend.focus_calls.clear();
+        std::thread::sleep(HOLD_FOCUS_RETRY);
+        m.pump();
+        assert!(m.backend().focus_calls.is_empty());
+    }
+
+    #[test]
+    fn leaving_a_scratchpad_focuses_a_window_of_the_new_space_first() {
+        let mut m = with_scratchpad();
+        m.backend.active = 20;
+        m.backend.open(3, "Mail");
+        m.refresh();
+        m.backend.active = 10;
+        m.refresh();
+        run(&mut m, "scratchpad toggle term").unwrap();
+        m.backend.open(2, "kitty");
+        m.refresh();
+        m.backend.focus_calls.clear();
+        m.backend.hidden.clear();
+        m.backend.active = 20;
+        m.backend.focused = Some(2);
+        m.refresh();
+        assert_eq!(m.backend().focus_calls.first(), Some(&3));
+        // Only once focus has gone there.
+        assert!(m.backend().hidden.is_empty());
+        m.pump();
+        assert_eq!(m.backend().hidden, [(2, true)]);
+    }
+
+    #[test]
+    fn a_scratchpad_out_by_other_means_closes_too() {
+        let mut m = with_scratchpad();
+        // Clicked in the Dock, not called with the key.
+        m.backend.open(2, "kitty");
+        m.refresh();
+        m.backend.active = 20;
+        m.backend.focused = None;
+        m.refresh();
+        m.pump();
+        assert_eq!(m.backend().hidden, [(2, true)]);
+    }
+
+    #[test]
+    fn a_scratchpads_windows_are_not_tiled() {
+        let mut m = with_scratchpad();
+        m.backend.open(2, "kitty");
+        m.refresh();
+        assert_eq!(m.tree().windows(), vec![1]);
+        assert!(run(&mut m, "scratchpad toggle nothing").is_err());
     }
 
     #[test]

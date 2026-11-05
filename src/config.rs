@@ -71,6 +71,8 @@ pub struct Config {
     /// Apps whose new windows float at a grid cell:
     /// (app, [rows, cols, x, y, w, h]).
     pub grid_rules: Vec<(String, [u32; 6])>,
+    /// Scratchpads: name, app, and where it floats.
+    pub scratchpads: Vec<(String, String, [u32; 6])>,
     /// Spaces (numbers or labels) whose windows are not tiled.
     pub float_spaces: Vec<String>,
     /// Keyboard shortcut lines (`cberry bind`).
@@ -134,6 +136,7 @@ impl Default for Config {
             labels: BTreeMap::new(),
             space_rules: Vec::new(),
             grid_rules: Vec::new(),
+            scratchpads: Vec::new(),
             float_spaces: Vec::new(),
             hotkeys: Vec::new(),
         }
@@ -526,6 +529,13 @@ impl Config {
         self.space_rules.retain(|(a, _, _)| !same_rule(a, app));
         self.space_rules
             .push((app.to_string(), space.to_string(), follow));
+    }
+
+    /// `cberry scratchpad <name> <app> [rows:cols:x:y:w:h]`.
+    pub fn set_scratchpad(&mut self, name: &str, app: &str, grid: [u32; 6]) {
+        self.scratchpads.retain(|(n, _, _)| n != name);
+        self.scratchpads
+            .push((name.to_string(), app.to_string(), grid));
     }
 
     /// `cberry rule grid <rows:cols:x:y:w:h> <app>`.

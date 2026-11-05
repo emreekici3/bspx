@@ -121,6 +121,7 @@ struct Names {
     focused_window: Cf,
     main: Cf,
     frontmost: Cf,
+    hidden: Cf,
     raise: Cf,
     enhanced_ui: Cf,
     destroyed: Cf,
@@ -148,6 +149,7 @@ impl Names {
             focused_window: cfstring("AXFocusedWindow"),
             main: cfstring("AXMain"),
             frontmost: cfstring("AXFrontmost"),
+            hidden: cfstring("AXHidden"),
             raise: cfstring("AXRaise"),
             enhanced_ui: cfstring("AXEnhancedUserInterface"),
             destroyed: cfstring("AXUIElementDestroyed"),
@@ -1650,6 +1652,38 @@ impl Backend for MacBackend {
 
     fn switch_to_space(&mut self, n: usize) -> Result<(), String> {
         desktop::switch(n)
+    }
+
+    fn set_app_hidden(&mut self, id: WinId, hidden: bool) {
+        let Some(pid) = self.windows.get(&id).map(|w| w.pid) else {
+            warn!("window {id} is not known: cannot hide or show its app");
+            return;
+        };
+        let value = unsafe {
+            if hidden {
+                kCFBooleanTrue
+            } else {
+                kCFBooleanFalse
+            }
+        };
+        let set = self
+            .app(pid)
+            .is_some_and(|app| set_attr(app, &self.names.hidden, value));
+        if !set {
+            warn!("macOS would not hide or show app {pid}");
+        }
+    }
+
+    fn launch_app(&mut self, app: &str) -> Result<(), String> {
+        let status = std::process::Command::new("/usr/bin/open")
+            .args(["-a", app])
+            .status()
+            .map_err(|e| format!("cannot start {app}: {e}"))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!("cannot start {app}"))
+        }
     }
 
     fn display_spaces(&mut self, shown: u64) -> Vec<u64> {

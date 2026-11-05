@@ -69,6 +69,12 @@ pub trait Backend {
     fn move_to_space(&mut self, _id: WinId, _space: u64) -> bool {
         false
     }
+    /// Hides the app of a window, or shows it again.
+    fn set_app_hidden(&mut self, _id: WinId, _hidden: bool) {}
+    /// Starts an app.
+    fn launch_app(&mut self, _app: &str) -> Result<(), String> {
+        Err("cannot start apps here".into())
+    }
     /// Moves a window to another Space without touching the pointer or
     /// taking the user there; returns whether it could.
     fn place_on_space(&mut self, _id: WinId, _space: u64) -> bool {

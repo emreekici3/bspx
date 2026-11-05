@@ -75,6 +75,14 @@ pub enum Command {
     /// Float the windows of an app at a grid cell when they open:
     /// `[rows, cols, x, y, w, h]`.
     GridRule { grid: [u32; 6], app: String },
+    /// Keep an app at hand: a name, its app, and where it floats.
+    Scratchpad {
+        name: String,
+        app: String,
+        grid: [u32; 6],
+    },
+    /// Show the scratchpad here, or put it away.
+    ScratchpadToggle(String),
     /// How round the ring around an app's windows is.
     BorderRadiusRule { radius: i32, app: String },
     /// Name a Space (numbered from 1, as in Mission Control); `None` lists
@@ -277,6 +285,30 @@ impl Command {
                     );
                 }
             },
+            Some("scratchpad") if words.get(1) == Some(&"toggle") => {
+                let name = words.get(2).ok_or("scratchpad toggle: missing name")?;
+                return Ok(Command::ScratchpadToggle((*name).to_string()));
+            }
+            Some("scratchpad") => {
+                const USE: &str = "usage: scratchpad <name> <app> [rows:cols:x:y:w:h]";
+                let name = words.get(1).ok_or(USE)?;
+                let last = words.last().filter(|w| w.contains(':'));
+                let grid = last.map_or(Ok(SCRATCHPAD_GRID), |g| parse_grid(g))?;
+                let end = words.len() - usize::from(last.is_some());
+                if end < 3 {
+                    return Err(USE.into());
+                }
+                let app = words[2..end].join(" ");
+                check_app_pattern(&app)?;
+                if app.starts_with('/') {
+                    return Err("scratchpad: the app must be a name, not a pattern".into());
+                }
+                return Ok(Command::Scratchpad {
+                    name: (*name).to_string(),
+                    app,
+                    grid,
+                });
+            }
             Some("rule") if words.get(1) == Some(&"grid") => {
                 let spec = words.get(2).ok_or("rule grid: missing rows:cols:x:y:w:h")?;
                 let grid = parse_grid(spec)?;
@@ -363,6 +395,9 @@ impl Command {
 }
 
 /// Parses `rows:cols:x:y:w:h`, checking that the cell lies inside the grid.
+/// Where a scratchpad floats unless it says: the middle of the display.
+const SCRATCHPAD_GRID: [u32; 6] = [6, 6, 1, 1, 4, 4];
+
 pub fn parse_grid(spec: &str) -> Result<[u32; 6], String> {
     let bad = || format!("grid: expected rows:cols:x:y:w:h, got '{spec}'");
     let nums = spec
@@ -413,6 +448,29 @@ mod tests {
                 follow: true,
             })
         );
+        assert_eq!(
+            Command::parse("scratchpad term kitty"),
+            Ok(Command::Scratchpad {
+                name: "term".into(),
+                app: "kitty".into(),
+                grid: SCRATCHPAD_GRID,
+            })
+        );
+        assert_eq!(
+            Command::parse("scratchpad notes Sticky Notes 4:4:1:1:2:2"),
+            Ok(Command::Scratchpad {
+                name: "notes".into(),
+                app: "Sticky Notes".into(),
+                grid: [4, 4, 1, 1, 2, 2],
+            })
+        );
+        assert_eq!(
+            Command::parse("scratchpad toggle term"),
+            Ok(Command::ScratchpadToggle("term".into()))
+        );
+        assert!(Command::parse("scratchpad term").is_err());
+        assert!(Command::parse("scratchpad toggle").is_err());
+        assert!(Command::parse("scratchpad term /kitty/").is_err());
         assert!(Command::parse("rule space web").is_err());
         assert!(Command::parse("rule space web --follow").is_err());
     }

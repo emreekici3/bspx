@@ -39,6 +39,13 @@
 | `cberry label [<n> <name>]` | Name Space `n`; alone, list the Spaces |
 | `cberry layout <space> bsp\|float` | Tile a Space, or leave its windows where you put them |
 
+### Scratchpads
+
+| Command | What it does |
+|---|---|
+| `cberry scratchpad <name> "<app>" [rows:cols:x:y:w:h]` | Keep an app at hand; it floats at the grid cell, the middle by default |
+| `cberry scratchpad toggle <name>` | Bring it here in focus, start it if needed, or put it away |
+
 ### Rules
 
 | Command | What it does |
