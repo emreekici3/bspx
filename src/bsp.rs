@@ -11,6 +11,9 @@ pub type WinId = u32;
 
 const MIN_RATIO: f32 = 0.05;
 const MAX_RATIO: f32 = 0.95;
+/// How far windows may overlap and still count as side by side: some cannot
+/// quite shrink to their slot.
+const CUT_TOLERANCE: i32 = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Split {
@@ -146,6 +149,49 @@ fn absorb(
     }
 }
 
+/// The first place the windows part into two groups along one axis: how many
+/// lie before it, and where the first group ends and the second starts.
+fn cut(windows: &mut [(WinId, Rect)], split: Split) -> Option<(usize, i32, i32)> {
+    let span = |r: &Rect| match split {
+        Split::Columns => (r.x, r.x + r.w),
+        Split::Rows => (r.y, r.y + r.h),
+    };
+    windows.sort_by_key(|(_, r)| span(r));
+    let mut end = i32::MIN;
+    for i in 1..windows.len() {
+        end = end.max(span(&windows[i - 1].1).1);
+        let start = span(&windows[i].1).0;
+        if end <= start + CUT_TOLERANCE {
+            return Some((i, end, start));
+        }
+    }
+    None
+}
+
+/// The tree that lays `windows` out in `area` as they are now, if one does.
+fn carve(windows: &mut [(WinId, Rect)], area: Rect, gap: i32) -> Option<Node> {
+    if let [(id, _)] = windows {
+        return Some(Node::Leaf(*id));
+    }
+    let (split, (at, end, start)) = cut(windows, Split::Columns)
+        .map(|c| (Split::Columns, c))
+        .or_else(|| cut(windows, Split::Rows).map(|c| (Split::Rows, c)))?;
+    let (origin, size) = match split {
+        Split::Columns => (area.x, area.w),
+        Split::Rows => (area.y, area.h),
+    };
+    let first = (end + start - gap) as f32 / 2.0 - origin as f32;
+    let ratio = (first / (size - gap).max(1) as f32).clamp(MIN_RATIO, MAX_RATIO);
+    let (rect_a, rect_b) = split_rect(area, split, ratio, gap);
+    let (before, after) = windows.split_at_mut(at);
+    Some(Node::Split {
+        split,
+        ratio,
+        a: Box::new(carve(before, rect_a, gap)?),
+        b: Box::new(carve(after, rect_b, gap)?),
+    })
+}
+
 /// Splits `area` into the two child areas of a split node, leaving `gap`
 /// points between them.
 pub fn split_rect(area: Rect, split: Split, ratio: f32, gap: i32) -> (Rect, Rect) {
@@ -179,6 +225,18 @@ pub struct BspTree {
 impl BspTree {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The tree of windows already laid out without overlaps, or `None` if
+    /// nothing like a tree would keep them where they are.
+    pub fn from_frames(windows: &[(WinId, Rect)], area: Rect, gap: i32) -> Option<Self> {
+        if windows.is_empty() {
+            return None;
+        }
+        let mut windows = windows.to_vec();
+        Some(Self {
+            root: Some(carve(&mut windows, area, gap)?),
+        })
     }
 
     pub fn root(&self) -> Option<&Node> {
@@ -756,6 +814,66 @@ pub fn neighbor(layout: &[(WinId, Rect)], from: WinId, dir: Direction) -> Option
         })
         .min()
         .map(|(_, _, w)| w)
+}
+
+#[cfg(test)]
+mod frames_tests {
+    use super::*;
+
+    const AREA: Rect = Rect::new(12, 44, 1488, 926);
+    const GAP: i32 = 8;
+
+    fn sized(tree: &BspTree) -> Vec<(WinId, Rect)> {
+        let mut out = tree.layout(AREA, GAP);
+        out.sort_by_key(|(w, _)| *w);
+        out
+    }
+
+    #[test]
+    fn a_layout_comes_back_from_its_frames() {
+        // One on the left, two stacked on the right, not half and half.
+        let mut tree = BspTree::new();
+        tree.insert(1, None, AREA, GAP, 0.3);
+        tree.insert(2, Some(1), AREA, GAP, 0.3);
+        tree.insert(3, Some(2), AREA, GAP, 0.7);
+        tree.insert(4, Some(1), AREA, GAP, 0.5);
+        let frames = sized(&tree);
+        for order in [[0, 1, 2, 3], [3, 2, 1, 0], [2, 0, 3, 1]] {
+            let shuffled: Vec<_> = order.iter().map(|i| frames[*i]).collect();
+            let back = BspTree::from_frames(&shuffled, AREA, GAP).unwrap();
+            assert_eq!(sized(&back), frames);
+        }
+    }
+
+    #[test]
+    fn windows_that_overlap_make_no_tree() {
+        let overlapping = [
+            (1, Rect::new(100, 100, 400, 400)),
+            (2, Rect::new(300, 200, 400, 400)),
+        ];
+        assert_eq!(BspTree::from_frames(&overlapping, AREA, GAP), None);
+        assert_eq!(BspTree::from_frames(&[], AREA, GAP), None);
+    }
+
+    #[test]
+    fn a_pinwheel_makes_no_tree() {
+        let pinwheel = [
+            (1, Rect::new(0, 0, 200, 100)),
+            (2, Rect::new(200, 0, 100, 200)),
+            (3, Rect::new(100, 200, 200, 100)),
+            (4, Rect::new(0, 100, 100, 200)),
+        ];
+        assert_eq!(BspTree::from_frames(&pinwheel, AREA, GAP), None);
+    }
+
+    #[test]
+    fn a_window_a_little_too_large_still_counts() {
+        let frames = [
+            (1, Rect::new(12, 44, 750, 926)),
+            (2, Rect::new(758, 44, 742, 926)),
+        ];
+        assert!(BspTree::from_frames(&frames, AREA, GAP).is_some());
+    }
 }
 
 #[cfg(test)]

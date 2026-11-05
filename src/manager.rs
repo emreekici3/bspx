@@ -588,6 +588,7 @@ impl<B: Backend> Manager<B> {
                 new.push((info.id, s));
             }
         }
+        dirty |= self.keep_layouts(&mut new, focused_now);
         new.sort_by_key(|(w, _)| Some(*w) == focused_now);
         for (id, s) in new {
             if s == self.active_space {
@@ -645,6 +646,48 @@ impl<B: Backend> Manager<B> {
         if dirty {
             self.relayout();
         }
+    }
+
+    /// Windows found on a Space with no layout yet, as when cberry starts,
+    /// stay where they are if they are tiled already. Takes those out of
+    /// `new`. Returns whether any were.
+    fn keep_layouts(&mut self, new: &mut Vec<(WinId, u64)>, focused: Option<WinId>) -> bool {
+        let spaces: HashSet<u64> = new.iter().map(|(_, s)| *s).collect();
+        let mut kept = false;
+        for space in spaces {
+            let empty = if space == self.active_space {
+                self.tree.is_empty()
+            } else {
+                self.spaces.get(&space).is_none_or(|s| s.tree.is_empty())
+            };
+            let frames: Vec<(WinId, Rect)> = new
+                .iter()
+                .filter(|(_, s)| *s == space)
+                .filter_map(|(id, _)| self.frames.get(id).map(|f| (*id, *f)))
+                .collect();
+            if !empty || frames.len() < 2 {
+                continue;
+            }
+            let area = self.inner_area_of(space);
+            let Some(tree) = BspTree::from_frames(&frames, area, self.config.gap) else {
+                continue;
+            };
+            debug!("keeping the layout of Space {space}");
+            let target = focused
+                .filter(|f| tree.contains(*f))
+                .or_else(|| tree.windows().last().copied());
+            if space == self.active_space {
+                self.tree = tree;
+                self.focused = target;
+            } else {
+                let state = self.spaces.entry(space).or_default();
+                state.tree = tree;
+                state.focused = target;
+            }
+            new.retain(|(_, s)| *s != space);
+            kept = true;
+        }
+        kept
     }
 
     /// Notes that the user is resizing: the layout before the first resize
@@ -4441,6 +4484,29 @@ pub(crate) mod tests {
         m.refresh();
         m.execute(&Command::parse("send 2").unwrap()).unwrap();
         assert_eq!(m.backend().space_of[&2], 21);
+    }
+
+    #[test]
+    fn windows_already_tiled_stay_where_they_are() {
+        let mut first = manager(0.0);
+        first.backend.open(1, "A");
+        first.backend.open(2, "B");
+        first.backend.open(3, "C");
+        first.refresh();
+        // Laid out one way, then cberry starts anew, seeing them in another
+        // order.
+        first.execute(&Command::parse("focus left").unwrap()).ok();
+        let mut windows = first.backend().windows.clone();
+        let before: Vec<_> = windows.iter().map(|w| (w.id, w.frame)).collect();
+        windows.reverse();
+        let mut m = manager(0.0);
+        m.backend.windows = windows;
+        m.backend.space_of = first.backend().space_of.clone();
+        m.backend.focused = Some(1);
+        m.refresh();
+        for (id, frame) in before {
+            assert_eq!(m.backend().frame(id), frame);
+        }
     }
 
     #[test]
